@@ -15,19 +15,23 @@ python sugarscape.py
 Makefile Options:
 make clean
     Clean up working files and logs created by the software.
-    Note: will remove any JSON files created by the other make options.
+    Note: This will remove any JSON files created by the other make options.
 
 make data
-    Run 20 random seeds comparing Bentham's utility calculus to the baseline greedy decisionmaking.
-    Note: results will be saved in the data subdirectory.
+    Run a number of random seeds comparing selected decision models.
+    Note: Results will be saved in the data subdirectory.
 
 make plots
-    Generate data plots from any JSON files in the data subdirectory.
-    Note: plots are dependent on a dataset existing and will create it if necessary.
+    Generate graph plots from any JSON files in the data subdirectory.
+    Note: Plots are dependent on a dataset existing and will create it if necessary.
+
+make seeds
+    Generate a set of random seeds comparing selected decision models.
+    Note: Results will be saved in the data subdirectory.
 
 make setup
-    Change preconfigured settings for the simulation, data collection, and datset plotting.
-    Note: changed settings may alter files in-place if editing the simulation configuration or Makefile options.
+    Change preconfigured settings for Bash and Python aliases.
+    Note: Changed settings may alter Makefile and configuration file in-place.
 
 make test
     Run the simulation using the default config.json file and storing a local log in the log.json file.
@@ -104,18 +108,14 @@ agentBaseInterestRate: [float, float]
     Set the interest rate for an agent's lending as a percentage.
     Default: [0.0, 0.0]
 
-agentDecisionModel: string
-    Set the agent decision model for different decisionmaking.
-    Options: "altruisticHalfLookaheadBinary", "altruisticHalfLookaheadTop", "benthamHalfLookaheadBinary", "benthamHalfLookaheadTop", "benthamNoLookaheadBinary", "benthamNoLookaheadTop", "egoisticHalfLookaheadBinary", "egoisticHalfLookaheadTop", "none", "rawSugarscape"
-    Default: "none"
-
-agentDecisionModelData: object
-    Set additional data for the agent decision model.
-    Note: Not currently implemented.
-
 agentDecisionModelFactor: [float, float]
     Set the agent weight of their decision model over biological imperatives.
     Default: [0, 0]
+
+agentDecisionModels: [string, ...]
+    Set the agent decision models for different decisionmaking.
+    Options: "altruisticHalfLookaheadBinary", "altruisticHalfLookaheadTop", "benthamHalfLookaheadBinary", "benthamHalfLookaheadTop", "benthamNoLookaheadBinary", "benthamNoLookaheadTop", "egoisticHalfLookaheadBinary", "egoisticHalfLookaheadTop", "none", "rawSugarscape"
+    Default: ["none"]
 
 agentFemaleInfertilityAge: [int, int]
     Set the timestep age at which female agents become infertile.
@@ -177,13 +177,18 @@ agentMovement: [int, int]
     Set maximum movement distance per timestep for agent.
     Default: [1, 6]
 
+agentMovementMode: string
+    Set the directionality used to figure out which cells an agent can move to.
+    Options: "cardinal", "radial"
+    Default: "cardinal"
+
 agentReplacements: int
     Set maximum number of agents to replace in environment on agent death.
     Default: 0
 
 agentSelfishnessFactor: [float, float]
     Set the agent weight of how egoistic ethical decisions are
-    Note: Valid range [0.0, 1.0], use -1 to disable
+    Note: Valid range is [0.0, 1.0], use -1 to disable
     Default: [-1, -1]
 
 agentSpiceMetabolism: [float, float]
@@ -231,6 +236,11 @@ agentVision: [int, int]
     Set the distance in the four cardinal directions an agent can see.
     Default: [1, 6]
 
+agentVisionMode: string
+    Set the directionality used to figure out which cells an agent can see.
+    Options: "cardinal", "radial"
+    Default: "cardinal"
+
 debugMode: [string, ...]
     Set the debug printing mode.
     Options: "agent", "all", "cell", "disease", "environment", "ethics", "none",  "sugarscape"
@@ -245,7 +255,7 @@ diseaseAggressionPenalty: [float, float]
 
 diseaseFertilityPenalty: [float, float]
     Set the impact a disease will have on an agent's fertility.
-    Note: Negative values constitute a lack of fertility.
+    Note: Negative values constitute a fertility decrease.
     Default: [0, 0]
 
 diseaseMovementPenalty: [int, int]
@@ -255,12 +265,12 @@ diseaseMovementPenalty: [int, int]
 
 diseaseSpiceMetabolismPenalty: [float, float]
     Set the impact a disease will have on an agent's spice metabolism rate.
-    Note: Negative values constitute a decrease in agent metabolism.
+    Note: Negative values constitute a decrease in agent spice metabolism.
     Default: [0, 0]
 
 diseaseSugarMetabolismPenalty: [float, float]
     Set the impact a disease will have on an agent's sugar metabolism rate.
-    Note: Negative values constitute a decrease in agent metabolism.
+    Note: Negative values constitute a decrease in agent sugar metabolism.
     Default: [0, 0]
 
 diseaseTagStringLength: [int, int]
@@ -272,6 +282,11 @@ diseaseVisionPenalty: [int, int]
     Set the impact a disease will have on an agent's vision.
     Note: Negative values constitute a decrease in agent vision.
     Default: [0, 0]
+
+environmentEquator: int
+    Set the equator of the environment for seasonal changes.
+    Note: Value of -1 causes equator to be set at the midpoint of the environment.
+    Default: -1
 
 environmentHeight: int
     Set the height in cells of the Sugarscape environment.
@@ -312,6 +327,10 @@ environmentSpiceConsumptionPollutionFactor: float
     Set the amount of pollution generated by an agent consuming spice at a cell.
     Default: 0
 
+environmentSpicePeaks: [[int, int], ...]
+    Set the coordinates for spice peaks in the environment.
+    Default: [[15, 15], [35, 35]]
+
 environmentSpiceProductionPollutionFactor: float
     Set the amount of pollution generated by an agent collecting spice at a cell.
     Default: 0
@@ -324,6 +343,10 @@ environmentSpiceRegrowRate: int
 environmentSugarConsumptionPollutionFactor: float
     Set the amount of pollution generated by an agent consuming sugar at a cell.
     Default: 0
+
+environmentSugarPeaks: [[int, int], ...]
+    Set the coordinates for sugar peaks in the environment.
+    Default: [[15, 35], [35, 15]]
 
 environmentSugarProductionPollutionFactor: float
     Set the amount of pollution generated by an agent collecting sugar at a cell.
@@ -350,9 +373,28 @@ headlessMode: bool
     Set whether the GUI is enabled.
     Default: false
 
+interfaceHeight: int
+    Set number of pixels for GUI height.
+    Note: Values below zero will cause the interface to fit to 1/2 total display height.
+    Default: 1000
+
+interfaceWidth: int
+    Set number of pixels for GUI width.
+    Default: 900
+    Note: Values below zero will cause the interface to fit to 1/2 total display width.
+
 logfile: path
     Set the path of the log file.
     Default: ""
+
+logfileFormat: string
+    Set the file format for the log file.
+    Default: "json"
+
+neighborhoodMode: string
+    Set the type of neighborhood adjacency used by agents and environment cells.
+    Options: "moore", "vonNeumann"
+    Default: "vonNeumann"
 
 profileMode: bool
     Set whether performance profiling mode is enabled.
@@ -378,9 +420,14 @@ timesteps: int
     Default: 200
 
 Other JSON Configurable Options:
-decisionModels: [string, ...]
-    Set the decision models (ethical theories) to be tested in data collection.
-    Default: ["benthamHalfLookaheadBinary", "egoisticHalfLookaheadBinary", "rawSugarscape"]
+bashAlias: string
+    Set the alias to the local Bash installation.
+    Note: Bash is required to run the data collection.
+    Default: "bash"
+
+decisionModels: [[string, ...], ...]
+    Set the agent decision models to be tested in data collection.
+    Default: [["none"]]
 
 jobUpdateFrequency: int
     Set the frequency at which the number of remaining jobs is reported.
@@ -394,20 +441,16 @@ numSeeds: int
     Set the number of random seeds to be tested in data collection.
     Default: 100
 
-pathToBash: path
-    Set the path to the local Bash installation.
-    Note: Bash is required to run the data collection.
-    Default: "bash"
-
-pathToPython: path
-    Set the path to the local Python 3 installation.
-    Note: Python 3 is required to run the simulation.
-    Default: "python"
-
 plots: [string, ...]
     Set the plots to be created once data has been collected.
     Default: ["population", "meanttl", "starvationCombat", "wealth", "wealthNormalized"]
 
 plotTimesteps: int
-    Set the number of timesteps to plot.
+    Set the number of timesteps to plot in graphs as the X axis.
+    Note: This option does not control how many timesteps the simulation runs.
     Default: 1000
+
+pythonAlias: string
+    Set the alias to the local Python 3 installation.
+    Note: Python 3 is required to run the simulation.
+    Default: "python"

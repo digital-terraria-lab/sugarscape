@@ -15,8 +15,8 @@ class Environment:
         self.seed = configuration["sugarscapeSeed"]
         self.seasonInterval = configuration["seasonInterval"]
         self.seasonalGrowbackDelay = configuration["seasonalGrowbackDelay"]
-        self.seasonNorth = "summer" if configuration["seasonInterval"] > 0 else None
-        self.seasonSouth = "winter" if configuration["seasonInterval"] > 0 else None
+        self.seasonNorth = "wet" if configuration["seasonInterval"] > 0 else None
+        self.seasonSouth = "dry" if configuration["seasonInterval"] > 0 else None
         self.seasonalGrowbackCountdown = configuration["seasonalGrowbackDelay"]
         self.pollutionDiffusionDelay = configuration["pollutionDiffusionDelay"]
         self.pollutionDiffusionCountdown = configuration["pollutionDiffusionDelay"]
@@ -27,7 +27,8 @@ class Environment:
         self.maxCombatLoot = configuration["maxCombatLoot"]
         self.universalSpiceIncomeInterval = configuration["universalSpiceIncomeInterval"]
         self.universalSugarIncomeInterval = configuration["universalSugarIncomeInterval"]
-        self.equator = math.ceil(self.height / 2)
+        self.equator = configuration["equator"] if configuration["equator"] >= 0 else math.ceil(self.height / 2)
+        self.neighborhoodMode = configuration["neighborhoodMode"]
         # Populate grid with NoneType objects
         self.grid = [[None for j in range(width)]for i in range(height)]
 
@@ -44,7 +45,7 @@ class Environment:
                 if self.seasonInterval > 0:
                     if self.timestep % self.seasonInterval == 0:
                         self.grid[i][j].updateSeason()
-                    if (cellSeason == "summer") or (cellSeason == "winter" and self.seasonalGrowbackCountdown == self.seasonalGrowbackDelay):
+                    if (cellSeason == "wet") or (cellSeason == "dry" and self.seasonalGrowbackCountdown == self.seasonalGrowbackDelay):
                         if self.grid[i][j].sugar + self.sugarRegrowRate != self.grid[i][j].sugar:
                             self.grid[i][j].sugarLastProduced = self.sugarRegrowRate
                         else:
@@ -81,9 +82,9 @@ class Environment:
     def findCellNeighbors(self):
         for i in range(self.height):
             for j in range(self.width):
-                self.grid[i][j].findNeighbors()
+                self.grid[i][j].findNeighbors(self.neighborhoodMode)
 
-    def findCellsInRange(self, startX, startY, gridRange):
+    def findCellsInCardinalRange(self, startX, startY, gridRange):
         cellsInRange = []
         for i in range(1, gridRange + 1):
             deltaNorth = (startY + i + self.height) % self.height
@@ -96,11 +97,34 @@ class Environment:
             cellsInRange.append({"cell": self.grid[deltaWest][startY], "distance": i})
         return cellsInRange
 
-    def placeCell(self, cell, x, y):
-        self.grid[x][y] = cell
+    def findCellsInRadialRange(self, startX, startY, gridRange):
+        cellsInRange = self.findCellsInCardinalRange(startX, startY, gridRange)
+        # Iterate through the upper left quadrant of the circle's bounding box
+        for i in range(startX - gridRange, startX):
+            for j in range(startY - gridRange, startY):
+                euclideanDistance = math.sqrt(pow((i - startX), 2) + pow((j - startY), 2))
+                # If agent can see at least part of a cell, they should be allowed to consider it
+                if euclideanDistance < gridRange + 1:
+                    deltaX = (i + self.height) % self.height
+                    reflectedX = (2 * startX - i + self.height) % self.height
+                    deltaY = (j + self.width) % self.width
+                    reflectedY = (2 * startY - j + self.width) % self.width
+                    cellsInRange.append({"cell": self.grid[deltaX][deltaY], "distance": euclideanDistance})
+                    cellsInRange.append({"cell": self.grid[deltaX][reflectedY], "distance": euclideanDistance})
+                    cellsInRange.append({"cell": self.grid[reflectedX][deltaY], "distance": euclideanDistance})
+                    cellsInRange.append({"cell": self.grid[reflectedX][reflectedY], "distance": euclideanDistance})
+        return cellsInRange
 
     def resetCell(self, x, y):
         self.grid[x][y] = None
+
+    def setCell(self, cell, x, y):
+        if self.grid[x][y] == None:
+            if y >= self.equator:
+                cell.season = self.seasonNorth
+            else:
+                cell.season = self.seasonSouth
+            self.grid[x][y] = cell
 
     def updatePollution(self):
         if self.pollutionDiffusionDelay > 0:
@@ -116,12 +140,12 @@ class Environment:
             if self.seasonalGrowbackCountdown == 0:
                 self.seasonalGrowbackCountdown = self.seasonalGrowbackDelay
             if self.timestep % self.seasonInterval == 0:
-                if self.seasonNorth == "summer":
-                    self.seasonNorth = "winter"
-                    self.seasonSouth = "summer"
+                if self.seasonNorth == "wet":
+                    self.seasonNorth = "dry"
+                    self.seasonSouth = "wet"
                 else:
-                    self.seasonNorth = "summer"
-                    self.seasonSouth = "winter"
+                    self.seasonNorth = "wet"
+                    self.seasonSouth = "dry"
 
     def __str__(self):
         string = ""

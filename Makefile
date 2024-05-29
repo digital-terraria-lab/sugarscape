@@ -1,9 +1,12 @@
 CONFIG = config.json
 DATACHECK = data/data.complete
+LOGS = log.csv log.json
 PLOTCHECK = plots/plots.complete
+SCREENSHOTS = *.ps
 
 DATASET = $(DATACHECK) \
 		data/*[[:digit:]]*.config \
+		data/*.csv \
 		data/*.json \
 		data/*.sh
 
@@ -12,13 +15,19 @@ PLOTS = $(PLOTCHECK) \
 		plots/*.pdf \
 		plots/*.plg
 
-CLEAN = log.json \
-		$(DATASET) \
-		$(PLOTS)
+CLEAN = $(DATASET) \
+		$(LOGS) \
+		$(PLOTS) \
+		$(SCREENSHOTS)
 
 # Change to python3 (or other alias) if needed
 PYTHON = python
 SUGARSCAPE = sugarscape.py
+
+# Check for local Bash and Python aliases
+BASHCHECK = $(shell which bash > /dev/null; echo $$?)
+PYCHECK = $(shell which python > /dev/null; echo $$?)
+PY3CHECK = $(shell which python3 > /dev/null; echo $$?)
 
 $(DATACHECK):
 	cd data && $(PYTHON) run.py --conf ../$(CONFIG)
@@ -34,10 +43,27 @@ data: $(DATACHECK)
 
 plots: $(PLOTCHECK)
 
+seeds:
+	cd data && $(PYTHON) run.py --conf ../$(CONFIG) --seeds
+
 setup:
-	@echo "Setup only works with a local Python 3 installation."
-	@echo "Please change the PYTHON variable to the path of your local Python 3 installation in the Makefile if this step fails."
-	$(PYTHON) setup.py && mv setup.json $(CONFIG)
+	@echo "Checking for local Bash and Python installations."
+ifneq ($(BASHCHECK), 0)
+	@echo "Could not find a local Bash installation."
+	@echo "Please update the Makefile and configuration file manually."
+else
+	@echo "Found alias for Bash."
+endif
+ifeq ($(PY3CHECK), 0)
+	@echo "Found alias for Python."
+	sed -i 's/PYTHON = python$$/PYTHON = python3/g' Makefile
+	sed -i 's/"python"/"python3"/g' $(CONFIG)
+else ifneq ($(PYCHECK), 0)
+	@echo "Could not find a local Python installation."
+	@echo "Please update the Makefile and configuration file manually."
+else
+	@echo "This message should never be reached."
+endif
 
 test:
 	$(PYTHON) $(SUGARSCAPE) --conf $(CONFIG)

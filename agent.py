@@ -3,8 +3,6 @@ import math
 import random
 import sys
 
-import ethics
-
 class Agent:
     def __init__(self, agentID, birthday, cell, configuration):
         self.ID = agentID
@@ -15,7 +13,9 @@ class Agent:
         self.sugarMetabolism = configuration["sugarMetabolism"]
         self.spiceMetabolism = configuration["spiceMetabolism"]
         self.movement = configuration["movement"]
+        self.movementMode = configuration["movementMode"]
         self.vision = configuration["vision"]
+        self.visionMode = configuration["visionMode"]
         self.sugar = configuration["sugar"]
         self.spice = configuration["spice"]
         self.startingSugar = configuration["sugar"]
@@ -43,12 +43,13 @@ class Agent:
         self.decisionModelFactor = configuration["decisionModelFactor"]
         self.selfishnessFactor = configuration["selfishnessFactor"]
         self.decisionModel = configuration["decisionModel"]
+        self.neighborhoodMode = configuration["neighborhoodMode"]
 
         self.alive = True
         self.age = 0
-        self.cellsInVision = []
-        self.neighborhood = []
+        self.cellsInRange = []
         self.lastMoved = -1
+        self.neighborhood = []
         self.vonNeumannNeighbors = {"north": None, "south": None, "east": None, "west": None}
         self.mooreNeighbors = {"north": None, "northeast": None, "northwest": None, "south": None, "southeast": None, "southwest": None, "east": None, "west": None}
         self.socialNetwork = {"father": None, "mother": None, "children": [], "friends": [], "creditors": [], "debtors": []}
@@ -66,11 +67,15 @@ class Agent:
         self.nice = 0
         self.childEndowmentHashes = None
         self.happiness = 0
+        self.wealthHappiness = 0
+        self.healthHappiness = 0
+        self.familyHappiness = 0
+        self.socialHappiness = 0
+        self.conflictHappiness = 0
         self.lastDoneCombat = -1
         self.lastReproduced = -1
         self.lastSugar = 0
         self.lastSpice = 0
-        self.lastReproduced = 0
         self.causeOfDeath = None
         self.lastUniversalSpiceIncomeTimestep = 0
         self.lastUniversalSugarIncomeTimestep = 0
@@ -84,7 +89,12 @@ class Agent:
     def addChildToCell(self, mate, cell, childConfiguration):
         sugarscape = self.cell.environment.sugarscape
         childID = sugarscape.generateAgentID()
-        child = Agent(childID, self.timestep, cell, childConfiguration)
+        childDecisionModel = childConfiguration["decisionModel"]
+        child = None
+        if childDecisionModel == self.decisionModel:
+            child = self.spawnChild(childID, self.timestep, cell, childConfiguration)
+        else:
+            child = mate.spawnChild(childID, self.timestep, cell, childConfiguration)
         child.gotoCell(cell)
         sugarscape.addAgent(child)
         child.collectResourcesAtCell()
@@ -127,7 +137,7 @@ class Agent:
         self.socialNetwork["creditors"].append(loan)
 
     def canReachCell(self, cell):
-        for seenCell in self.cellsInVision:
+        for seenCell in self.cellsInRange:
             if seenCell["cell"] == cell:
                 return True
         return False
@@ -161,17 +171,16 @@ class Agent:
         disease.agent = self
 
     def collectResourcesAtCell(self):
-        if self.cell != None:
-            sugarCollected = self.cell.sugar
-            spiceCollected = self.cell.spice
-            self.sugar += sugarCollected
-            self.spice += spiceCollected
-            self.wealth += sugarCollected + spiceCollected
-            self.updateMeanIncome(sugarCollected, spiceCollected)
-            self.cell.doSugarProductionPollution(sugarCollected)
-            self.cell.doSpiceProductionPollution(spiceCollected)
-            self.cell.resetSugar()
-            self.cell.resetSpice()
+        sugarCollected = self.cell.sugar
+        spiceCollected = self.cell.spice
+        self.sugar += sugarCollected
+        self.spice += spiceCollected
+        self.wealth += sugarCollected + spiceCollected
+        self.updateMeanIncome(sugarCollected, spiceCollected)
+        self.cell.doSugarProductionPollution(sugarCollected)
+        self.cell.doSpiceProductionPollution(spiceCollected)
+        self.cell.resetSugar()
+        self.cell.resetSpice()
 
     def defaultOnLoan(self, loan):
         for creditor in self.socialNetwork["creditors"]:
@@ -179,7 +188,7 @@ class Agent:
         return
 
     def doAging(self):
-        if self.alive == False:
+        if self.isAlive() == False:
             return
         self.age += 1
         # Die if reached max age and if not infinitely-lived
@@ -207,6 +216,12 @@ class Agent:
         self.causeOfDeath = causeOfDeath
         self.resetCell()
         self.doInheritance()
+
+        # Keep only debtors and children in social network to handle outstanding loans
+        self.socialNetwork = {"debtors": self.socialNetwork["debtors"], "children": self.socialNetwork["children"]}
+        self.neighborhood = []
+        self.vonNeumannNeighbors = {}
+        self.mooreNeighbors = {}
 
     def doDisease(self):
         diseases = self.diseases
@@ -333,11 +348,11 @@ class Agent:
                 continue
             elif borrower.isCreditWorthy(sugarLoanAmount, spiceLoanAmount, self.loanDuration) == True:
                 if "all" in self.debug or "agent" in self.debug:
-                    print("Agent {0} lending [{1},{2}]".format(str(self), sugarLoanAmount, spiceLoanAmount))
+                    print("Agent {0} lending [{1},{2}]".format(self.ID, sugarLoanAmount, spiceLoanAmount))
                 self.addLoanToAgent(borrower, self.lastMoved, sugarLoanPrincipal, sugarLoanAmount, spiceLoanPrincipal, spiceLoanAmount, self.loanDuration)
 
     def doMetabolism(self):
-        if self.alive == False:
+        if self.isAlive() == False:
             return
         spiceMetabolism = self.findSpiceMetabolism()
         sugarMetabolism = self.findSugarMetabolism()
@@ -345,19 +360,21 @@ class Agent:
         self.spice -= spiceMetabolism
         self.cell.doSugarConsumptionPollution(sugarMetabolism)
         self.cell.doSpiceConsumptionPollution(spiceMetabolism)
-        if (self.sugar < 1 and sugarMetabolism > 0) or (self.spice < 1 and spiceMetabolism > 0):
+        if self.sugar < 0 or self.spice < 0:
+            self.doDeath("starvation")
+        elif (self.sugar <= 0 and sugarMetabolism > 0) or (self.spice <= 0 and spiceMetabolism > 0):
             self.doDeath("starvation")
 
     def doReproduction(self):
         # Agent marked for removal or not interested in reproduction should not reproduce
-        if self.alive == False or self.isFertile() == False:
+        if self.isAlive() == False or self.isFertile() == False:
             return
         neighborCells = self.cell.neighbors
         random.shuffle(neighborCells)
         emptyCells = self.findEmptyNeighborCells()
         for neighborCell in neighborCells:
             neighbor = neighborCell.agent
-            if neighbor != None:
+            if neighbor != None and neighbor.isAlive() == True:
                 neighborCompatibility = self.isNeighborReproductionCompatible(neighbor)
                 emptyCellsWithNeighbor = emptyCells + neighbor.findEmptyNeighborCells()
                 random.shuffle(emptyCellsWithNeighbor)
@@ -370,6 +387,8 @@ class Agent:
                         continue
                     childEndowment = self.findChildEndowment(neighbor)
                     child = self.addChildToCell(neighbor, emptyCell, childEndowment)
+                    child.findCellsInRange()
+                    child.findNeighborhood()
                     self.socialNetwork["children"].append(child)
                     childID = child.ID
                     neighborID = neighbor.ID
@@ -390,10 +409,10 @@ class Agent:
                     neighbor.spice = neighbor.spice - mateSpiceCost
                     self.lastReproduced = self.cell.environment.sugarscape.timestep
                     if "all" in self.debug or "agent" in self.debug:
-                        print("Agent {0} reproduced with agent {1} at cell ({2},{3})".format(str(self), str(neighbor), emptyCell.x, emptyCell.y))
+                        print("Agent {0} reproduced with agent {1} at cell ({2},{3})".format(self.ID, str(neighbor), emptyCell.x, emptyCell.y))
 
     def doTagging(self):
-        if self.tags == None or self.alive == False:
+        if self.tags == None or self.isAlive() == False:
             return
         neighborCells = self.cell.neighbors
         random.shuffle(neighborCells)
@@ -407,20 +426,14 @@ class Agent:
     def doTimestep(self, timestep):
         self.timestep = timestep
         # Prevent dead or already moved agent from moving
-        if self.alive == True and self.cell != None and self.lastMoved != self.timestep:
-            self.sugar += self.universalSugar
-            self.spice += self.universalSpice
-            self.lastReproduced = 0
-            self.lastSugar = self.sugar
-            self.lastSpice = self.spice
-            self.lastReproduced = 0
+        if self.isAlive() == True and self.lastMoved != self.timestep:
             self.lastSugar = self.sugar
             self.lastSpice = self.spice
             self.lastMoved = self.timestep
-            self.doUniversalIncome()
             self.moveToBestCell()
             self.updateNeighbors()
             self.collectResourcesAtCell()
+            self.doUniversalIncome()
             self.doMetabolism()
             # If dead from metabolism, skip remainder of timestep
             if self.alive == False:
@@ -431,6 +444,9 @@ class Agent:
             self.doLending()
             self.doDisease()
             self.doAging()
+            # If dead from aging, skip remainder of timestep
+            if self.alive == False:
+                return
             self.updateHappiness()
 
     def doUniversalIncome(self):
@@ -481,6 +497,12 @@ class Agent:
                 spiceSellerMRS = spiceSeller.marginalRateOfSubstitution
                 sugarSellerMRS = sugarSeller.marginalRateOfSubstitution
 
+                # TODO: Fix bug where a spice or sugar seller has a negative MRS
+                if spiceSellerMRS < 0 or sugarSellerMRS < 0:
+                    spiceSeller = None
+                    sugarSeller = None
+                    break
+
                 # Find geometric mean of spice and sugar seller MRS for trade price
                 tradePrice = math.sqrt(spiceSellerMRS * sugarSellerMRS)
                 sugarPrice = 0
@@ -514,7 +536,7 @@ class Agent:
                 checkForMRSCrossing = spiceSellerNewMRS < sugarSellerNewMRS
                 if betterForSpiceSeller == True and betterForSugarSeller == True and checkForMRSCrossing == False:
                     if "all" in self.debug or "agent" in self.debug:
-                        print("Agent {0} trading [{1}, {2}]".format(str(self), sugarPrice, spicePrice))
+                        print("Agent {0} trading [{1}, {2}]".format(self.ID, sugarPrice, spicePrice))
                     spiceSeller.sugar += sugarPrice
                     spiceSeller.spice -= spicePrice
                     sugarSeller.sugar -= sugarPrice
@@ -541,42 +563,38 @@ class Agent:
             return agent.wealth
 
     def findAggression(self):
-        return self.aggressionFactor + self.aggressionFactorModifier
+        return max(0, self.aggressionFactor + self.aggressionFactorModifier)
 
     def findBestCell(self):
         self.findNeighborhood()
-        retaliators = self.findRetaliatorsInVision()
-        random.shuffle(self.cellsInVision)
+        if len(self.cellsInRange) == 0:
+            return self.cell
+        random.shuffle(self.cellsInRange)
 
-        bestCell = None
-        bestRange = max(self.cell.environment.height, self.cell.environment.width)
-        bestWealth = 0
-        agentX = self.cell.x
-        agentY = self.cell.y
+        retaliators = self.findRetaliatorsInVision()
         combatMaxLoot = self.cell.environment.maxCombatLoot
-        wraparound = self.findVision() + 1
-        potentialCells = []
         aggression = self.findAggression()
 
-        for currCell in self.cellsInVision:
+        bestCell = None
+        bestWealth = 0
+        bestRange = max(self.cell.environment.height, self.cell.environment.width)
+        potentialCells = []
+
+        for currCell in self.cellsInRange:
             cell = currCell["cell"]
             travelDistance = currCell["distance"]
 
-            if cell.isOccupied() == True and aggression == 0:
-                continue
-            prey = cell.agent
             # Avoid attacking agents ineligible to attack
-            if prey != None and self.isNeighborValidPrey(prey) == False:
+            prey = cell.agent
+            if cell.isOccupied() and self.isNeighborValidPrey(prey) == False:
                 continue
             preyTribe = prey.tribe if prey != None else "empty"
-            preyWealth = prey.wealth if prey != None else 0
             preySugar = prey.sugar if prey != None else 0
             preySpice = prey.spice if prey != None else 0
             # Aggression factor may lead agent to see more reward than possible meaning combat itself is a reward
             welfarePreySugar = aggression * min(combatMaxLoot, preySugar)
             welfarePreySpice = aggression * min(combatMaxLoot, preySpice)
 
-            cellWealth = 0
             # Modify value of cell relative to the metabolism needs of the agent
             welfare = self.findWelfare((cell.sugar + welfarePreySugar), (cell.spice + welfarePreySpice))
             cellWealth = welfare / (1 + cell.pollution)
@@ -585,16 +603,11 @@ class Agent:
             if prey != None and retaliators[preyTribe] > self.wealth + cellWealth:
                 continue
 
-            if bestCell == None:
-                bestCell = cell
-                bestRange = travelDistance
-                bestWealth = cellWealth
-
             # Select closest cell with the most resources
             if cellWealth > bestWealth or (cellWealth == bestWealth and travelDistance < bestRange):
-                bestRange = travelDistance
                 bestCell = cell
                 bestWealth = cellWealth
+                bestRange = travelDistance
 
             cellRecord = {"cell": cell, "wealth": cellWealth, "range": travelDistance}
             potentialCells.append(cellRecord)
@@ -603,8 +616,6 @@ class Agent:
             bestCell = self.findBestEthicalCell(potentialCells, bestCell)
         if bestCell == None:
             bestCell = self.cell
-        if "all" in self.debug or "agent" in self.debug:
-            print("Agent {0} moving to ({1},{2})".format(str(self), bestCell.x, bestCell.y))
         return bestCell
 
     def findBestEthicalCell(self, cells, greedyBestCell=None):
@@ -612,60 +623,23 @@ class Agent:
             return None
         bestCell = None
         cells = self.sortCellsByWealth(cells)
-        cells.reverse()
         if "all" in self.debug or "agent" in self.debug:
             self.printCellScores(cells)
         # If not an ethical agent, return top selfish choice
         if self.decisionModel == "none":
             return greedyBestCell
 
-        # Calculate initial utility value calculation and naively select based on binary decision first
-        if "benthamNoLookahead" in self.decisionModel:
-            for cell in cells:
-                ethicalScore = ethics.findBenthamNoLookaheadValueOfCell(self, cell["cell"])
-                cell["wealth"] = ethicalScore
-            for cell in cells:
-                if cell["wealth"] > 0:
-                    bestCell = cell["cell"]
-                    break
-        elif "benthamHalfLookahead" in self.decisionModel:
-            for cell in cells:
-                ethicalScore = ethics.findBenthamHalfLookaheadValueOfCell(self, cell["cell"])
-                cell["wealth"] = ethicalScore
-            for cell in cells:
-                if cell["wealth"] > 0:
-                    bestCell = cell["cell"]
-                    break
-
-        elif "altruisticHalfLookahead" in self.decisionModel:
-            for cell in cells:
-                ethicalScore = ethics.findAltruisticHalfLookaheadValueOfCell(self, cell["cell"])
-                cell["wealth"] = ethicalScore
-            for cell in cells:
-                if cell["wealth"] > 0:
-                    bestCell = cell["cell"]
-                    break
-        elif "egoisticHalfLookahead" in self.decisionModel:
-            for cell in cells:
-                ethicalScore = ethics.findEgoisticHalfLookaheadValueOfCell(self, cell["cell"])
-                cell["wealth"] = ethicalScore
-            for cell in cells:
-                if cell["wealth"] > 0:
-                    bestCell = cell["cell"]
-                    break
-        elif "egoisticNoLookahead" in self.decisionModel:
-            for cell in cells:
-                ethicalScore = ethics.findEgoisticNoLookaheadValueOfCell(self, cell["cell"])
-                cell["wealth"] = ethicalScore
-            for cell in cells:
-                if cell["wealth"] > 0:
-                    bestCell = cell["cell"]
-                    break
+        for cell in cells:
+            ethicalScore = self.findEthicalValueOfCell(cell["cell"])
+            cell["wealth"] = ethicalScore
+        for cell in cells:
+            if cell["wealth"] > 0:
+                bestCell = cell["cell"]
+                break
 
         # If additional ordering consideration, select new best cell
         if "Top" in self.decisionModel:
             cells = self.sortCellsByWealth(cells)
-            cells.reverse()
             if "all" in self.debug or "agent" in self.debug:
                 self.printEthicalCellScores(cells)
             bestCell = cells[0]["cell"]
@@ -676,7 +650,7 @@ class Agent:
             else:
                 bestCell = greedyBestCell
             if "all" in self.debug or "agent" in self.debug:
-                print("Agent {0} could not find an ethical cell".format(str(self)))
+                print("Agent {0} could not find an ethical cell".format(self.ID))
         return bestCell
 
     def findBestFriend(self):
@@ -691,15 +665,18 @@ class Agent:
                 minHammingDistance = friend["hammingDistance"]
         return bestFriend
 
-    def findCellsInVision(self, newCell=None):
+    def findCellsInRange(self, newCell=None):
         cell = self.cell if newCell == None else newCell
         vision = self.findVision()
-        if vision > 0 and self.cell != None:
-            allCells = self.cell.environment.findCellsInRange(cell.x, cell.y, vision)
+        movement = self.findMovement()
+        cellRange = min(vision, movement)
+        if cellRange > 0:
+            if (self.visionMode == "cardinal" and cellRange == vision) or (self.movementMode == "cardinal" and cellRange == movement):
+                allCells = self.cell.environment.findCellsInCardinalRange(cell.x, cell.y, cellRange)
+            else:
+                allCells = self.cell.environment.findCellsInRadialRange(cell.x, cell.y, cellRange)
             if newCell == None:
-                self.cellsInVision = allCells
-            # Shuffle cells for movement considerations
-            random.shuffle(allCells)
+                self.cellsInRange = allCells
             return allCells
         return []
 
@@ -707,8 +684,6 @@ class Agent:
         parentEndowments = {
         "aggressionFactor": [self.aggressionFactor, mate.aggressionFactor],
         "baseInterestRate": [self.baseInterestRate, mate.baseInterestRate],
-        "decisionModelFactor": [self.decisionModelFactor, mate.decisionModelFactor],
-        "decisionModel": [self.decisionModel, mate.decisionModel],
         "fertilityAge": [self.fertilityAge, mate.fertilityAge],
         "fertilityFactor": [self.fertilityFactor, mate.fertilityFactor],
         "infertilityAge": [self.infertilityAge, mate.infertilityAge],
@@ -719,17 +694,27 @@ class Agent:
         "maxAge": [self.maxAge, mate.maxAge],
         "maxFriends": [self.maxFriends, mate.maxFriends],
         "movement": [self.movement, mate.movement],
-        "selfishnessFactor" : [self.selfishnessFactor, mate.selfishnessFactor],
+        "movementMode": [self.movementMode, mate.movementMode],
         "spiceMetabolism": [self.spiceMetabolism, mate.spiceMetabolism],
         "sugarMetabolism": [self.sugarMetabolism, mate.sugarMetabolism],
         "sex": [self.sex, mate.sex],
         "tradeFactor": [self.tradeFactor, mate.tradeFactor],
         "vision": [self.vision, mate.vision],
+        "visionMode": [self.visionMode, mate.visionMode],
         "universalSpice": [self.universalSpice, mate.universalSpice],
-        "universalSugar": [self.universalSugar, mate.universalSugar]
+        "universalSugar": [self.universalSugar, mate.universalSugar],
+        "neighborhoodMode": [self.neighborhoodMode, mate.neighborhoodMode]
+        }
+
+        # These endowments should always come from the same parent for sensible outcomes
+        pairedEndowments = {
+        "decisionModel": [self.decisionModel, mate.decisionModel],
+        "decisionModelFactor": [self.decisionModelFactor, mate.decisionModelFactor],
+        "selfishnessFactor" : [self.selfishnessFactor, mate.selfishnessFactor],
         }
         childEndowment = {"seed": self.seed}
-        randomNumberReset = random.getstate() 
+        randomNumberReset = random.getstate()
+
         # Map configuration to a random number via hash to make random number generation independent of iteration order
         if self.childEndowmentHashes == None:
             self.childEndowmentHashes = {}
@@ -737,12 +722,25 @@ class Agent:
                 hashed = hashlib.md5(config.encode())
                 hashNum = int(hashed.hexdigest(), 16)
                 self.childEndowmentHashes[config] = hashNum
+            for config in pairedEndowments:
+                hashed = hashlib.md5(config.encode())
+                hashNum = int(hashed.hexdigest(), 16)
+                self.childEndowmentHashes[config] = hashNum
 
         for endowment in parentEndowments:
+            index = random.randrange(2)
             random.seed(self.childEndowmentHashes[endowment] + self.timestep)
-            endowmentValue = parentEndowments[endowment][random.randrange(2)]
+            endowmentValue = parentEndowments[endowment][index]
             childEndowment[endowment] = endowmentValue
-        
+
+        pairedEndowmentIndex = -1
+        for endowment in pairedEndowments:
+            if pairedEndowmentIndex == -1:
+                random.seed(self.childEndowmentHashes[endowment] + self.timestep)
+                pairedEndowmentIndex = random.randrange(2)
+            endowmentValue = pairedEndowments[endowment][pairedEndowmentIndex]
+            childEndowment[endowment] = endowmentValue
+
         # Each parent gives a portion of their starting endowment for child endowment
         childStartingSugar = (self.startingSugar / (self.fertilityFactor * 2)) + (mate.startingSugar / (mate.fertilityFactor * 2))
         childStartingSpice = (self.startingSpice / (self.fertilityFactor * 2)) + (mate.startingSpice / (mate.fertilityFactor * 2))
@@ -780,15 +778,15 @@ class Agent:
         childEndowment["immuneSystem"] = childImmuneSystem
         random.setstate(randomNumberReset)
         return childEndowment
-    
+
     def findConflictHappiness(self):
-        if self.cell != None and self.lastDoneCombat == self.cell.environment.sugarscape.timestep:
+        if self.lastDoneCombat == self.cell.environment.sugarscape.timestep:
             if(self.findAggression() > 1):
                 return 1
             else:
                 return -0.5
         return 0
-    
+
     def findCurrentSpiceDebt(self):
         spiceDebt = 0
         for creditor in self.socialNetwork["creditors"]:
@@ -819,20 +817,20 @@ class Agent:
             if neighborCell.agent == None:
                 emptyCells.append(neighborCell)
         return emptyCells
-    
+
     def findFamilyHappiness(self):
-        totalFamilyHappiness = 0
-        if self.lastReproduced == self.cell.environment.sugarscape.timestep:
-            totalFamilyHappiness = 0.5
+        familyHappiness = 0
+        if self.lastReproduced == self.timestep:
+            familyHappiness = 0.5
         for child in self.socialNetwork["children"]:
-            if child.isAlive() == False and totalFamilyHappiness != -1:
-                totalFamilyHappiness -= 0.125 
-            if child.isAlive() == True and totalFamilyHappiness < 1:
+            if child.isAlive() == False and familyHappiness != -1:
+                familyHappiness -= 0.125
+            if child.isAlive() == True and familyHappiness < 1:
                 if child.isSick():
-                    totalFamilyHappiness -= 0.05
+                    familyHappiness -= 0.05
                 else:
-                    totalFamilyHappiness += 0.05
-        return totalFamilyHappiness
+                    familyHappiness += 0.05
+        return familyHappiness
 
     def findHammingDistanceInTags(self, neighbor):
         if self.tags == None:
@@ -843,16 +841,16 @@ class Agent:
             if self.tags[i] != neighborTags[i]:
                 hammingDistance += 1
         return hammingDistance
-    
+
     def findHappiness(self):
-        if self.cell != None:
-            return self.findWealthHappiness() + self.findConflictHappiness() + self.findFamilyHappiness() + self.findSocialHappiness() + self.findHealthHappiness()
-        
+        return self.findWealthHappiness() + self.findConflictHappiness() + self.findFamilyHappiness() + self.findSocialHappiness() + self.findHealthHappiness()
+
     def findHealthHappiness(self):
-        if self.isSick:
+        if self.isSick():
             return -1
-        else: return 1
-    
+        else:
+            return 1
+
     def findMarginalRateOfSubstitution(self):
         spiceMetabolism = self.findSpiceMetabolism()
         sugarMetabolism = self.findSugarMetabolism()
@@ -883,7 +881,7 @@ class Agent:
         return diseaseStats
 
     def findNeighborhood(self, newCell=None):
-        newNeighborhood = self.findCellsInVision(newCell)
+        newNeighborhood = self.findCellsInRange(newCell)
         neighborhood = []
         for neighborCell in newNeighborhood:
             neighbor = neighborCell["cell"].agent
@@ -944,7 +942,7 @@ class Agent:
 
     def findRetaliatorsInVision(self):
         retaliators = {}
-        for cell in self.cellsInVision:
+        for cell in self.cellsInRange:
             agent = cell["cell"].agent
             if agent != None:
                 if agent.tribe not in retaliators:
@@ -952,7 +950,7 @@ class Agent:
                 elif retaliators[agent.tribe] < agent.wealth:
                     retaliators[agent.tribe] = agent.wealth
         return retaliators
-       
+
     def findSocialHappiness(self):
         if len(self.socialNetwork["friends"]) < 1:
             return -0.8
@@ -967,7 +965,7 @@ class Agent:
         else:
             if len(self.socialNetwork["friends"]) * 0.1 < 1:
                 return len(self.socialNetwork["friends"]) * 0.1
-            else: 
+            else:
                 return 1
 
     def findSpiceMetabolism(self):
@@ -999,18 +997,17 @@ class Agent:
         return max(0, self.vision + self.visionModifier)
 
     def findWealthHappiness(self):
-        if self.cell != None:
-            if self.cell.environment.sugarscape.runtimeStats["meanWealth"] < 1:
-                return 0
-            elif(self.wealth < 1):
+        if self.cell.environment.sugarscape.runtimeStats["meanWealth"] < 1:
+            return 0
+        elif(self.wealth < 1):
+            return -1
+        else:
+            if math.log(self.wealth * 0.01, self.cell.environment.sugarscape.runtimeStats["meanWealth"] )*5 > 1:
+                return 1
+            elif math.log(self.wealth * 0.01, self.cell.environment.sugarscape.runtimeStats["meanWealth"] )*5 < -1:
                 return -1
-            else:
-                if math.log(self.wealth * 0.01, self.cell.environment.sugarscape.runtimeStats["meanWealth"] )*5 > 1:
-                    return 1
-                elif math.log(self.wealth * 0.01, self.cell.environment.sugarscape.runtimeStats["meanWealth"] )*5 < -1:
-                    return -1
-                return (math.log(self.wealth * 0.01, self.cell.environment.sugarscape.runtimeStats["meanWealth"] )*5)
-    
+            return (math.log(self.wealth * 0.01, self.cell.environment.sugarscape.runtimeStats["meanWealth"] )*5)
+
     def findWelfare(self, sugarReward, spiceReward):
         spiceMetabolism = self.findSpiceMetabolism()
         sugarMetabolism = self.findSugarMetabolism()
@@ -1050,13 +1047,14 @@ class Agent:
         self.tags[position] = value
 
     def gotoCell(self, cell):
-        if(self.cell != None):
-            self.resetCell()
+        self.resetCell()
         self.cell = cell
         self.cell.agent = self
 
     def isAlive(self):
-        return self.alive
+        if self.spice < 0 and self.sugar < 0:
+            self.alive = False
+        return self.alive and self.spice >= 0 and self.sugar >= 0
 
     def isBorrower(self):
         if self.age >= self.fertilityAge and self.age < self.infertilityAge and self.isFertile() == False:
@@ -1106,7 +1104,7 @@ class Agent:
             return False
 
     def isNeighborValidPrey(self, neighbor):
-        if neighbor == None or self.findAggression() == 0:
+        if neighbor == None or self.findAggression() <= 0:
             return False
         elif self.tribe != neighbor.tribe and self.wealth >= neighbor.wealth:
             return True
@@ -1119,6 +1117,8 @@ class Agent:
 
     def moveToBestCell(self):
         bestCell = self.findBestCell()
+        if "all" in self.debug or "agent" in self.debug:
+            print("Agent {0} moving to ({1},{2})".format(self.ID, bestCell.x, bestCell.y))
         if self.findAggression() > 0:
             self.doCombat(bestCell)
         else:
@@ -1212,16 +1212,19 @@ class Agent:
             self.addAgentToSocialNetwork(mother)
         self.socialNetwork["mother"] = mother
 
+    def spawnChild(self, childID, birthday, cell, configuration):
+        return Agent(childID, birthday, cell, configuration)
+
     def spreadDisease(self, agent, disease):
         sugarscape = self.cell.environment.sugarscape
         sugarscape.addDisease(disease, agent)
 
     def sortCellsByWealth(self, cells):
-        # Insertion sort of cells by wealth with range as a tiebreaker
+        # Insertion sort of cells by wealth in descending order with range as a tiebreaker
         i = 0
         while i < len(cells):
             j = i
-            while j > 0 and (cells[j - 1]["wealth"] > cells[j]["wealth"] or (cells[j - 1]["wealth"] == cells[j]["wealth"] and cells[j - 1]["range"] <= cells[j]["range"])):
+            while j > 0 and (cells[j - 1]["wealth"] < cells[j]["wealth"] or (cells[j - 1]["wealth"] == cells[j]["wealth"] and cells[j - 1]["range"] > cells[j]["range"])):
                 currCell = cells[j]
                 cells[j] = cells[j - 1]
                 cells[j - 1] = currCell
@@ -1287,20 +1290,21 @@ class Agent:
                 self.payDebt(creditor)
 
     def updateMooreNeighbors(self):
+        # Necessitates finding von Neumann neighbors before invoking this method
         for direction, neighbor in self.vonNeumannNeighbors.items():
             self.mooreNeighbors[direction] = neighbor
         north = self.mooreNeighbors["north"]
         south = self.mooreNeighbors["south"]
         east = self.mooreNeighbors["east"]
         west = self.mooreNeighbors["west"]
-        self.mooreNeighbors["northeast"] = north.cell.findEastNeighbor() if north != None else None
-        self.mooreNeighbors["northeast"] = east.cell.findNorthNeighbor() if east != None and self.mooreNeighbors["northeast"] == None else None
-        self.mooreNeighbors["northwest"] = north.cell.findWestNeighbor() if north != None else None
-        self.mooreNeighbors["northwest"] = west.cell.findNorthNeighbor() if west != None and self.mooreNeighbors["northwest"] == None else None
-        self.mooreNeighbors["southeast"] = south.cell.findEastNeighbor() if south != None else None
-        self.mooreNeighbors["southeast"] = east.cell.findSouthNeighbor() if east != None and self.mooreNeighbors["southeast"] == None else None
-        self.mooreNeighbors["southwest"] = south.cell.findWestNeighbor() if south != None else None
-        self.mooreNeighbors["southwest"] = west.cell.findSouthNeighbor() if west != None and self.mooreNeighbors["southwest"] == None else None
+        self.mooreNeighbors["northeast"] = north.cell.findEastNeighbor().agent if north != None else None
+        self.mooreNeighbors["northeast"] = east.cell.findNorthNeighbor().agent if east != None and self.mooreNeighbors["northeast"] == None else None
+        self.mooreNeighbors["northwest"] = north.cell.findWestNeighbor().agent if north != None else None
+        self.mooreNeighbors["northwest"] = west.cell.findNorthNeighbor().agent if west != None and self.mooreNeighbors["northwest"] == None else None
+        self.mooreNeighbors["southeast"] = south.cell.findEastNeighbor().agent if south != None else None
+        self.mooreNeighbors["southeast"] = east.cell.findSouthNeighbor().agent if east != None and self.mooreNeighbors["southeast"] == None else None
+        self.mooreNeighbors["southwest"] = south.cell.findWestNeighbor().agent if south != None else None
+        self.mooreNeighbors["southwest"] = west.cell.findSouthNeighbor().agent if west != None and self.mooreNeighbors["southwest"] == None else None
 
     def updateMarginalRateOfSubstitutionForAgent(self, agent):
         agentID = agent.ID
@@ -1320,7 +1324,8 @@ class Agent:
         self.updateSocialNetwork()
 
     def updateSocialNetwork(self):
-        for direction, neighbor in self.vonNeumannNeighbors.items():
+        neighborhood = self.vonNeumannNeighbors if self.neighborhoodMode == "vonNeumann" else self.mooreNeighbors
+        for direction, neighbor in neighborhood.items():
             if neighbor == None:
                 continue
             neighborID = neighbor.ID
@@ -1360,6 +1365,13 @@ class Agent:
         self.vonNeumannNeighbors["west"] = self.cell.findWestNeighbor().agent
 
     def updateHappiness(self):
+        if self.isAlive() == False:
+            return
+        self.healthHappiness = self.findHealthHappiness()
+        self.wealthHappiness = self.findWealthHappiness()
+        self.socialHappiness = self.findSocialHappiness()
+        self.familyHappiness = self.findFamilyHappiness()
+        self.conflictHappiness = self.findConflictHappiness()
         self.happiness = self.findHappiness()
 
     def __str__(self):
