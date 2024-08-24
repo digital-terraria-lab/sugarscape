@@ -20,6 +20,10 @@ class Environment:
         self.seasonalGrowbackCountdown = configuration["seasonalGrowbackDelay"]
         self.pollutionDiffusionDelay = configuration["pollutionDiffusionDelay"]
         self.pollutionDiffusionCountdown = configuration["pollutionDiffusionDelay"]
+        self.pollutionDiffusionStart = configuration["pollutionDiffusionTimeframe"][0]
+        self.pollutionDiffusionEnd = configuration["pollutionDiffusionTimeframe"][1]
+        self.pollutionStart = configuration["pollutionTimeframe"][0]
+        self.pollutionEnd = configuration["pollutionTimeframe"][1]
         self.sugarConsumptionPollutionFactor = configuration["sugarConsumptionPollutionFactor"]
         self.spiceConsumptionPollutionFactor = configuration["spiceConsumptionPollutionFactor"]
         self.sugarProductionPollutionFactor = configuration["sugarProductionPollutionFactor"]
@@ -29,8 +33,25 @@ class Environment:
         self.universalSugarIncomeInterval = configuration["universalSugarIncomeInterval"]
         self.equator = configuration["equator"] if configuration["equator"] >= 0 else math.ceil(self.height / 2)
         self.neighborhoodMode = configuration["neighborhoodMode"]
+        self.wraparound = configuration["wraparound"]
+        self.maxCellDistance = 0
         # Populate grid with NoneType objects
         self.grid = [[None for j in range(height)]for i in range(width)]
+
+    def createDistanceTable(self, maxDeltaX, maxDeltaY):
+        distanceTable = {}
+        lowerMax = min(maxDeltaX, maxDeltaY)
+        upperMax = max(maxDeltaX, maxDeltaY)
+        lowerBorder = self.width if lowerMax == maxDeltaX else self.height
+        upperBorder = self.width if lowerMax == maxDeltaY else self.height
+        for lowerDelta in range(lowerMax + 1):
+            for upperDelta in range(max(1, lowerDelta), upperMax + 1):
+                lowerDelta = self.findWraparoundDistance(lowerDelta, lowerBorder)
+                upperDelta = self.findWraparoundDistance(upperDelta, upperBorder)
+                # Delta pair is used as a key to look up hypotenuse
+                deltaPair = (lowerDelta, upperDelta)
+                distanceTable[deltaPair] = math.sqrt(lowerDelta ** 2 + upperDelta ** 2)
+        return distanceTable
 
     def doCellUpdate(self):
         for i in range(self.width):
@@ -67,7 +88,12 @@ class Environment:
                         self.grid[i][j].spiceLastProduced = 0
                     self.grid[i][j].sugar = sugarRegrowth
                     self.grid[i][j].spice = spiceRegrowth
-                if self.pollutionDiffusionDelay > 0 and self.pollutionDiffusionCountdown == self.pollutionDiffusionDelay:
+        if self.pollutionDiffusionStart <= self.timestep <= self.pollutionDiffusionEnd and self.pollutionDiffusionDelay > 0 and self.pollutionDiffusionCountdown == self.pollutionDiffusionDelay:
+            for i in range(self.height):
+                for j in range(self.width):
+                    self.grid[i][j].findPollutionFlux()
+            for i in range(self.height):
+                for j in range(self.width):
                     self.grid[i][j].doPollutionDiffusion()
 
     def doTimestep(self, timestep):
@@ -75,6 +101,19 @@ class Environment:
         self.updateSeasons()
         self.updatePollution()
         self.doCellUpdate()
+
+    def findCardinalCellRanges(self, maxDeltaX, maxDeltaY, cellCoords):
+        numCells = self.width * self.height
+        for i in range(numCells):
+            x1, y1 = cellCoords[i]
+            for j in range(x1 + 1, x1 + maxDeltaX + 1):
+                deltaX = self.findWraparoundDistance(j - x1, self.width)
+                self.grid[x1][y1].ranges[deltaX][self.grid[j % self.width][y1]] = deltaX
+                self.grid[j % self.width][y1].ranges[deltaX][self.grid[x1][y1]] = deltaX
+            for j in range(y1 + 1, y1 + maxDeltaY + 1):
+                deltaY = self.findWraparoundDistance(j - y1, self.height)
+                self.grid[x1][y1].ranges[deltaY][self.grid[x1][j % self.height]] = deltaY
+                self.grid[x1][j % self.height].ranges[deltaY][self.grid[x1][y1]] = deltaY
 
     def findCell(self, x, y):
         return self.grid[x][y]
@@ -84,36 +123,54 @@ class Environment:
             for j in range(self.height):
                 self.grid[i][j].findNeighbors(self.neighborhoodMode)
 
-    def findCellsInCardinalRange(self, startX, startY, gridRange):
-        cellsInRange = []
-        for i in range(1, gridRange + 1):
-            deltaNorth = (startY - i + self.height) % self.height
-            deltaSouth = (startY + i + self.height) % self.height
-            deltaEast = (startX + i + self.width) % self.width
-            deltaWest = (startX - i + self.width) % self.width
-            cellsInRange.append({"cell": self.grid[startX][deltaNorth], "distance": i})
-            cellsInRange.append({"cell": self.grid[startX][deltaSouth], "distance": i})
-            cellsInRange.append({"cell": self.grid[deltaEast][startY], "distance": i})
-            cellsInRange.append({"cell": self.grid[deltaWest][startY], "distance": i})
-        return cellsInRange
+    def findCellRanges(self):
+        config = self.sugarscape.configuration
+        # Determine maximum range to memoize based on the maximum possible agent vision and movement from bonuses
+        maxVision = config["startingDiseases"] * max(config["diseaseVisionPenalty"][1], 0) + config["agentVision"][1]
+        maxMovement = config["startingDiseases"] * max(config["diseaseMovementPenalty"][1], 0) + config["agentMovement"][1]
+        maxAgentRange = max(maxVision, maxMovement)
+        maxDeltaX = min(maxAgentRange, self.width // 2)
+        maxDeltaY = min(maxAgentRange, self.height // 2)
+        maxRadialDelta = min(maxAgentRange, math.floor(math.sqrt((self.width // 2) ** 2 + (self.height // 2) ** 2)))
+        if self.wraparound == False:
+            maxDeltaX = min(maxAgentRange, self.width - 1)
+            maxDeltaY = min(maxAgentRange, self.height - 1)
+            maxRadialDelta = min(maxAgentRange, math.floor(math.sqrt((self.width - 1) ** 2 + (self.height - 1) ** 2)))
+        maxCardinalDelta = max(maxDeltaX, maxDeltaY)
+        self.maxCellDistance = maxRadialDelta if config["agentVisionMode"] == "radial" and config["agentMovementMode"] == "radial" else maxCardinalDelta
+        cellCoords = [(x, y) for x in range(self.width) for y in range(self.height)]
+        # Initialize ranges with all possible values
+        for x, y in cellCoords:
+            self.grid[x][y].ranges = {gridRange: {} for gridRange in range(1, self.maxCellDistance + 1)}
 
-    def findCellsInRadialRange(self, startX, startY, gridRange):
-        cellsInRange = self.findCellsInCardinalRange(startX, startY, gridRange)
-        # Iterate through the upper left quadrant of the circle's bounding box
-        for i in range(startX - gridRange, startX):
-            for j in range(startY - gridRange, startY):
-                euclideanDistance = math.sqrt(pow((i - startX), 2) + pow((j - startY), 2))
-                # If agent can see at least part of a cell, they should be allowed to consider it
-                if euclideanDistance < gridRange + 1:
-                    deltaX = (i + self.width) % self.width
-                    reflectedX = (2 * startX - i + self.width) % self.width
-                    deltaY = (j + self.height) % self.height
-                    reflectedY = (2 * startY - j + self.height) % self.height
-                    cellsInRange.append({"cell": self.grid[deltaX][deltaY], "distance": euclideanDistance})
-                    cellsInRange.append({"cell": self.grid[deltaX][reflectedY], "distance": euclideanDistance})
-                    cellsInRange.append({"cell": self.grid[reflectedX][deltaY], "distance": euclideanDistance})
-                    cellsInRange.append({"cell": self.grid[reflectedX][reflectedY], "distance": euclideanDistance})
-        return cellsInRange
+        if config["agentVisionMode"] == "radial" and config["agentMovementMode"] == "radial":
+            self.findRadialCellRanges(maxDeltaX, maxDeltaY, maxRadialDelta, cellCoords)
+        else:
+            self.findCardinalCellRanges(maxDeltaX, maxDeltaY, cellCoords)
+
+    def findRadialCellRanges(self, maxDeltaX, maxDeltaY, maxDeltaRadius, cellCoords):
+        distanceTable = self.createDistanceTable(maxDeltaX, maxDeltaY)
+        numCells = self.width * self.height
+        for i in range(numCells):
+            x1, y1 = cellCoords[i]
+            for j in range(i + 1, numCells):
+                x2, y2 = cellCoords[j]
+                deltaX = self.findWraparoundDistance(x1 - x2, self.width)
+                deltaY = self.findWraparoundDistance(y1 - y2, self.height)
+                if deltaX > maxDeltaX or deltaY > maxDeltaY:
+                    continue
+                deltaPair = tuple(sorted((deltaX, deltaY)))
+                distance = distanceTable[deltaPair]
+                gridRange = math.floor(distance)
+                if gridRange <= maxDeltaRadius:
+                    self.grid[x1][y1].ranges[gridRange][self.grid[x2][y2]] = distance
+                    self.grid[x2][y2].ranges[gridRange][self.grid[x1][y1]] = distance
+
+    def findWraparoundDistance(self, delta, border):
+        delta = abs(delta)
+        if self.sugarscape.configuration["environmentWraparound"] == True and delta > border / 2:
+            delta = border - delta
+        return delta
 
     def resetCell(self, x, y):
         self.grid[x][y] = None
@@ -127,7 +184,7 @@ class Environment:
             self.grid[x][y] = cell
 
     def updatePollution(self):
-        if self.pollutionDiffusionDelay > 0:
+        if self.pollutionDiffusionStart <= self.timestep <= self.pollutionDiffusionEnd and self.pollutionDiffusionDelay > 0:
             self.pollutionDiffusionCountdown -= 1
             # Pollution diffusion delay over
             if self.pollutionDiffusionCountdown == 0:
