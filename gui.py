@@ -6,9 +6,9 @@ class GUI:
         self.sugarscape = sugarscape
         self.screenHeight = screenHeight
         self.screenWidth = screenWidth
-        self.window = None
         self.canvas = None
         self.grid = [[None for j in range(self.sugarscape.environmentHeight)]for i in range(self.sugarscape.environmentWidth)]
+        self.window = None
 
         sugarAndSpiceColors = self.findSugarAndSpiceColors("#F2FA00", "#9B4722")
         pollutionColors = self.findColorRange("#FFFFFF", "#803280", 0, 20)
@@ -26,9 +26,15 @@ class GUI:
         for i in range(numDecisionModels):
             self.colors[self.sugarscape.configuration["agentDecisionModels"][i]] = self.palette[i]
 
+        # Set the default strings for interface at simulation start
+        self.defaultAgentString = "Agent: - | Age: - | Vision: - | Movement: - | Sugar: - | Spice: - | Metabolism: - | Decision Model: - | Tribe: -"
+        self.defaultCellString = "Cell: - | Sugar: - | Spice: - | Pollution: - | Season: -"
+        self.defaultSimulationString = "Timestep: - | Population: - | Metabolism: - | Movement: - | Vision: - | Gini: - | Trade Price: - | Trade Volume: -"
+
         self.widgets = {}
         self.activeNetwork = None
         self.activeGraph = None
+        self.borderEdge = 5
         self.graphObjects = {}
         self.graphBorder = 90
         self.xTicks = 10
@@ -36,15 +42,14 @@ class GUI:
         self.lastSelectedAgentColor = None
         self.lastSelectedEnvironmentColor = None
         self.activeColorOptions = {"agent": None, "environment": None}
-        self.highlightedCell = None
         self.highlightedAgent = None
+        self.highlightedCell = None
         self.highlightRectangle = None
         self.menuTrayColumns = 6
-        self.borderEdge = 5
         self.siteHeight = (self.screenHeight - 2 * self.borderEdge) / self.sugarscape.environmentHeight
         self.siteWidth = (self.screenWidth - 2 * self.borderEdge) / self.sugarscape.environmentWidth
-        self.configureWindow()
         self.stopSimulation = False
+        self.configureWindow()
 
     def clearHighlight(self):
         self.highlightedAgent = None
@@ -69,6 +74,7 @@ class GUI:
         networkNames = self.configureNetworkNames()
         networkNames.insert(0, "None")
         self.activeNetwork = tkinter.StringVar(window)
+
         # Use first item as default name
         self.activeNetwork.set(networkNames[0])
         for network in networkNames:
@@ -81,6 +87,7 @@ class GUI:
         graphNames = self.configureGraphNames()
         graphNames.insert(0, "None")
         self.activeGraph = tkinter.StringVar(window)
+
         # Use first item as default name
         self.activeGraph.set(graphNames[0])
         for graph in graphNames:
@@ -94,6 +101,7 @@ class GUI:
         agentColorNames.sort()
         agentColorNames.insert(0, "Default")
         self.lastSelectedAgentColor = tkinter.StringVar(window)
+
         # Use first item as default name
         self.lastSelectedAgentColor.set(agentColorNames[0])
         for name in agentColorNames:
@@ -107,15 +115,16 @@ class GUI:
         environmentColorNames.sort()
         environmentColorNames.insert(0, "Default")
         self.lastSelectedEnvironmentColor = tkinter.StringVar(window)
+
         # Use first item as default name
         self.lastSelectedEnvironmentColor.set(environmentColorNames[0])
         for name in environmentColorNames:
             environmentColorMenu.add_checkbutton(label=name, onvalue=name, offvalue=name, variable=self.lastSelectedEnvironmentColor, command=self.doEnvironmentColorMenu, indicatoron=True)
         environmentColorButton.grid(row=0, column=5, sticky="nsew")
 
-        statsLabel = tkinter.Label(window, text="Timestep: - | Population: - | Metabolism: - | Movement: - | Vision: - | Gini: - | Trade Price: - | Trade Volume: -", font="Roboto 10", justify=tkinter.CENTER)
+        statsLabel = tkinter.Label(window, text=self.defaultSimulationString, font="Roboto 10", justify=tkinter.CENTER)
         statsLabel.grid(row=1, column=0, columnspan=self.menuTrayColumns, sticky="nsew")
-        cellLabel = tkinter.Label(window, text="Cell: - | Sugar: - | Spice: - | Pollution: - | Season: -\nAgent: - | Age: - | Vision: - | Movement: - | Sugar: - | Spice: - | Metabolism: - | Decision Model: -", font="Roboto 10", justify=tkinter.CENTER)
+        cellLabel = tkinter.Label(window, text=f"{self.defaultCellString}\n{self.defaultAgentString}", font="Roboto 10", justify=tkinter.CENTER)
         cellLabel.grid(row=2, column=0, columnspan=self.menuTrayColumns, sticky="nsew")
 
         self.widgets["playButton"] = playButton
@@ -238,15 +247,15 @@ class GUI:
         if self.sugarscape.timestep != 0:
             self.updateHistogram()
 
-    def configureNetworkNames(self):
-        return ["Disease", "Family", "Friends", "Loans", "Neighbors", "Trade"]
-
     def configureLorenzCurve(self):
         self.configureGraphAxes()
         self.graphObjects["giniCoefficientLabel"] = self.canvas.create_text(
             self.graphStartX + 20, self.graphStartY + 20, anchor="nw", fill="black", text="Gini coefficient:")
         if self.sugarscape.timestep != 0:
             self.updateLorenzCurve()
+
+    def configureNetworkNames(self):
+        return ["Disease", "Family", "Friends", "Loans", "Neighbors", "Trade"]
 
     def configureWindow(self):
         window = tkinter.Tk()
@@ -287,17 +296,6 @@ class GUI:
         self.activeColorOptions["agent"] = self.lastSelectedAgentColor.get()
         self.doTimestep()
 
-    def doControlClick(self, event):
-        self.doubleClick = False
-        cell = self.findClickedCell(event)
-        if cell == self.highlightedCell or cell.agent == None:
-            self.clearHighlight()
-        else:
-            self.highlightedCell = cell
-            self.highlightedAgent = cell.agent
-            self.highlightCell(cell)
-        self.doTimestep()
-
     def doClick(self, event):
         self.canvas.after(300, self.doClickAction, event)
 
@@ -319,6 +317,17 @@ class GUI:
                 self.highlightedCell = cell
                 self.highlightedAgent = None
                 self.highlightCell(cell)
+        self.doTimestep()
+
+    def doControlClick(self, event):
+        self.doubleClick = False
+        cell = self.findClickedCell(event)
+        if cell == self.highlightedCell or cell.agent == None:
+            self.clearHighlight()
+        else:
+            self.highlightedCell = cell
+            self.highlightedAgent = cell.agent
+            self.highlightCell(cell)
         self.doTimestep()
 
     def doCrossPlatformWindowSizing(self):
@@ -669,12 +678,12 @@ class GUI:
             if agent != None:
                 agentStats = f"Agent: {str(agent)} | Age: {agent.age} | Vision: {round(agent.findVision(), 2)} | Movement: {round(agent.findMovement(), 2)} | "
                 agentStats += f"Sugar: {round(agent.sugar, 2)} | Spice: {round(agent.spice, 2)} | "
-                agentStats += f"Metabolism: {round(((agent.findSugarMetabolism() + agent.findSpiceMetabolism()) / 2), 2)} | Decision Model: {agent.decisionModel}"
+                agentStats += f"Metabolism: {round(((agent.findSugarMetabolism() + agent.findSpiceMetabolism()) / 2), 2)} | Decision Model: {agent.decisionModel} | Tribe: {agent.tribe}"
             else:
-                agentStats = "Agent: - | Age: - | Vision: - | Movement: - | Sugar: - | Spice: - | Metabolism: - | Decision Model: -"
+                agentStats = self.defaultAgentString
             cellStats += f"\n{agentStats}"
         else:
-            cellStats = "Cell: - | Sugar: - | Spice: - | Pollution: - | Season: -\nAgent: - | Age: - | Sugar: - | Spice: - "
+            cellStats = f"{self.defaultCellString}\n{self.defaultAgentString}"
 
         label = self.widgets["cellLabel"]
         label.config(text=cellStats)
