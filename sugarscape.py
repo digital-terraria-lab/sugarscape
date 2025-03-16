@@ -54,6 +54,7 @@ class Sugarscape:
         self.bornAgents = []
         self.deadAgents = []
         self.diseases = []
+        self.agentLeader = None
         self.activeQuadrants = self.findActiveQuadrants()
         self.configureAgents(configuration["startingAgents"])
         self.configureDiseases(configuration["startingDiseases"])
@@ -68,7 +69,8 @@ class Sugarscape:
                              "agentsBorn": 0, "agentStarvationDeaths": 0, "agentDiseaseDeaths": 0, "environmentWealthCreated": 0, "agentWealthTotal": 0,
                              "environmentWealthTotal": 0, "agentWealthCollected": 0, "agentWealthBurnRate": 0, "agentMeanTimeToLive": 0, "agentTotalMetabolism": 0,
                              "agentCombatDeaths": 0, "agentAgingDeaths": 0, "agentDeaths": 0, "largestTribe": 0, "largestTribeSize": 0,
-                             "remainingTribes": self.configuration["environmentMaxTribes"], "sickAgents": 0}
+                             "remainingTribes": self.configuration["environmentMaxTribes"], "sickAgents": 0, "carryingCapacity": 0, "meanDeathsPercentage": 0,
+                             "sickAgentsPercentage": 0}
         self.graphStats = {"ageBins": [], "sugarBins": [], "spiceBins": [], "lorenzCurvePoints": [], "meanTribeTags": [],
                            "maxSugar": 0, "maxSpice": 0, "maxWealth": 0}
         self.log = open(configuration["logfile"], 'a') if configuration["logfile"] != None else None
@@ -120,6 +122,9 @@ class Sugarscape:
         if self.environment == None:
             return
 
+        if self.configuration["agentLeader"] == True:
+            numAgents += 1
+
         emptyCells = [[cell for cell in quadrant if cell.agent == None] for quadrant in self.activeQuadrants]
         totalCells = sum(len(quadrant) for quadrant in emptyCells)
         quadrants = len(emptyCells)
@@ -143,6 +148,11 @@ class Sugarscape:
             agentConfiguration = agentEndowments[i]
             agentID = self.generateAgentID()
             a = agent.Agent(agentID, self.timestep, randomCell, agentConfiguration)
+            if self.configuration["agentLeader"] == True and i == 0:
+                a = ethics.Leader(agentID, self.timestep, randomCell, agentConfiguration)
+                cornerCell = self.environment.grid[0][0]
+                a.gotoCell(cornerCell)
+                self.agentLeader = a
             # If using a different decision model, replace new agent with instance of child class
             if "altruist" in agentConfiguration["decisionModel"]:
                 a = ethics.Bentham(agentID, self.timestep, randomCell, agentConfiguration)
@@ -248,7 +258,11 @@ class Sugarscape:
         else:
             self.environment.doTimestep(self.timestep)
             random.shuffle(self.agents)
+            if self.agentLeader != None:
+                self.agentLeader.doTimestep(self.timestep)
             for agent in self.agents:
+                if self.agentLeader != None and agent == self.agentLeader:
+                    continue
                 agent.doTimestep(self.timestep)
             self.removeDeadAgents()
             self.replaceDeadAgents()
@@ -479,6 +493,7 @@ class Sugarscape:
         femaleFertilityAge = configs["agentFemaleFertilityAge"]
         femaleInfertilityAge = configs["agentFemaleInfertilityAge"]
         fertilityFactor = configs["agentFertilityFactor"]
+        follower = configs["agentLeader"]
         immuneSystemLength = configs["agentImmuneSystemLength"]
         inheritancePolicy = configs["agentInheritancePolicy"]
         lendingFactor = configs["agentLendingFactor"]
@@ -614,7 +629,7 @@ class Sugarscape:
                               "immuneSystem": immuneSystems.pop(), "inheritancePolicy": inheritancePolicy,
                               "decisionModel": decisionModels.pop(), "decisionModelLookaheadFactor": decisionModelLookaheadFactor,
                               "movementMode": movementMode, "neighborhoodMode": neighborhoodMode, "visionMode": visionMode,
-                              "depressionFactor": depressionFactors[i]}
+                              "depressionFactor": depressionFactors[i], "follower": follower}
             for config in configurations:
                 # If sexes are enabled, ensure proper fertility and infertility ages are set
                 if sexes[i] == "female" and config == "femaleFertilityAge":
@@ -839,6 +854,8 @@ class Sugarscape:
         ageBins = [0] * histogramBins
         if maxAge != -1:
             for agent in self.agents:
+                if agent == self.agentLeader:
+                    continue
                 ageBins[math.floor(agent.age / (maxAge + 1) * histogramBins)] += 1
 
         maxSpice = 0
@@ -859,6 +876,8 @@ class Sugarscape:
         spiceBins = [0] * histogramBins
         agentWealths = []
         for agent in self.agents:
+            if agent == self.agentLeader:
+                continue
             spiceBins[math.floor(agent.spice / (maxSpice + 1) * histogramBins)] += 1
             sugarBins[math.floor(agent.sugar / (maxSugar + 1) * histogramBins)] += 1
             agentWealths.append(agent.sugar + agent.spice)
@@ -921,6 +940,10 @@ class Sugarscape:
         numTribes = 0
         sickAgents = 0
         tradeVolume = 0
+        carryingCapacityWeight = 0.05
+        carryingCapacity = math.ceil((carryingCapacityWeight * len(self.agents)) + ((1 - carryingCapacityWeight) * self.runtimeStats["carryingCapacity"]))
+        if self.timestep == 0:
+            carryingCapacity = len(self.agents)
 
         environmentWealthCreated = 0
         environmentWealthTotal = 0
@@ -940,6 +963,9 @@ class Sugarscape:
         agentWealthBurnRate = 0
         agentWealthCollected = 0
         agentWealthTotal = 0
+
+        meanDeathsPercentage = 0
+        sickAgentsPercentage = 0
 
         agentsBorn = 0
         agentsReplaced = 0
@@ -984,6 +1010,21 @@ class Sugarscape:
                 tribes[agent.tribe] += 1
             numAgents += 1
 
+        numDeadAgents = 0
+        meanAgeAtDeath = 0
+        for agent in self.deadAgents:
+            if group != None and agent.isInGroup(group, notInGroup) == False:
+                continue
+            agentWealth = agent.sugar + agent.spice
+            meanAgeAtDeath += agent.age
+            agentWealthCollected += agentWealth - (agent.lastSugar + agent.lastSpice)
+            agentAgingDeaths += 1 if agent.causeOfDeath == "aging" else 0
+            agentCombatDeaths += 1 if agent.causeOfDeath == "combat" else 0
+            agentDiseaseDeaths += 1 if agent.causeOfDeath == "disease" else 0
+            agentStarvationDeaths += 1 if agent.causeOfDeath == "starvation" else 0
+            numDeadAgents += 1
+        meanAgeAtDeath = round(meanAgeAtDeath / numDeadAgents, 2) if numDeadAgents > 0 else 0
+
         if numAgents > 0:
             agentMeanTimeToLive = round(agentMeanTimeToLive / numAgents, 2)
             agentWealthBurnRate = round(agentWealthBurnRate / numAgents, 2)
@@ -1009,6 +1050,8 @@ class Sugarscape:
             minWealth = round(minWealth, 2)
             remainingTribes = len(tribes)
             tradeVolume = round(tradeVolume, 2)
+            meanDeathsPercentage = round(numDeadAgents / numAgents, 2) * 100
+            sickAgentsPercentage = round(sickAgents / numAgents, 2) * 100
         else:
             agentMeanTimeToLive = 0
             agentWealthBurnRate = 0
@@ -1029,21 +1072,6 @@ class Sugarscape:
             remainingTribes = 0
             tradeVolume = 0
 
-        numDeadAgents = 0
-        meanAgeAtDeath = 0
-        for agent in self.deadAgents:
-            if group != None and agent.isInGroup(group, notInGroup) == False:
-                continue
-            agentWealth = agent.sugar + agent.spice
-            meanAgeAtDeath += agent.age
-            agentWealthCollected += agentWealth - (agent.lastSugar + agent.lastSpice)
-            agentAgingDeaths += 1 if agent.causeOfDeath == "aging" else 0
-            agentCombatDeaths += 1 if agent.causeOfDeath == "combat" else 0
-            agentDiseaseDeaths += 1 if agent.causeOfDeath == "disease" else 0
-            agentStarvationDeaths += 1 if agent.causeOfDeath == "starvation" else 0
-            numDeadAgents += 1
-        meanAgeAtDeath = round(meanAgeAtDeath / numDeadAgents, 2) if numDeadAgents > 0 else 0
-
         for agent in self.replacedAgents:
             if group != None and agent.isInGroup(group, notInGroup) == False:
                 continue
@@ -1059,12 +1087,13 @@ class Sugarscape:
                         "agentDiseaseDeaths": agentDiseaseDeaths, "agentMeanTimeToLive": agentMeanTimeToLive, "agentsBorn": agentsBorn,
                         "agentsReplaced": agentsReplaced, "agentStarvationDeaths": agentStarvationDeaths, "agentTotalMetabolism": agentTotalMetabolism,
                         "agentWealthBurnRate": agentWealthBurnRate, "agentWealthCollected": agentWealthCollected, "agentWealthTotal": agentWealthTotal,
-                        "largestTribe": maxTribe, "largestTribeSize": maxTribeSize, "maxWealth": maxWealth, "meanAge": meanAge,
-                        "meanAgeAtDeath": meanAgeAtDeath, "meanConflictHappiness": meanConflictHappiness, "meanFamilyHappiness": meanFamilyHappiness,
-                        "meanHappiness": meanHappiness, "meanHealthHappiness": meanHealthHappiness, "meanMetabolism": meanMetabolism,
-                        "meanMovement": meanMovement, "meanSocialHappiness": meanSocialHappiness, "meanTradePrice": meanTradePrice,
-                        "meanWealth": meanWealth, "meanWealthHappiness": meanWealthHappiness, "meanVision": meanVision, "minWealth": minWealth,
-                        "population": numAgents, "sickAgents": sickAgents, "remainingTribes": remainingTribes, "tradeVolume": tradeVolume}
+                        "carryingCapacity": carryingCapacity, "largestTribe": maxTribe, "largestTribeSize": maxTribeSize, "maxWealth": maxWealth,
+                        "meanAge": meanAge, "meanAgeAtDeath": meanAgeAtDeath, "meanConflictHappiness": meanConflictHappiness,
+                        "meanFamilyHappiness": meanFamilyHappiness, "meanHappiness": meanHappiness, "meanHealthHappiness": meanHealthHappiness,
+                        "meanMetabolism": meanMetabolism, "meanMovement": meanMovement, "meanSocialHappiness": meanSocialHappiness,
+                        "meanTradePrice": meanTradePrice, "meanWealth": meanWealth, "meanWealthHappiness": meanWealthHappiness, "meanVision": meanVision,
+                        "minWealth": minWealth, "population": numAgents, "sickAgents": sickAgents, "remainingTribes": remainingTribes,
+                        "tradeVolume": tradeVolume, "meanDeathsPercentage": meanDeathsPercentage, "sickAgentsPercentage": sickAgentsPercentage}
 
         if group == None:
             self.runtimeStats["environmentWealthCreated"] = environmentWealthCreated
@@ -1370,6 +1399,7 @@ if __name__ == "__main__":
                      "agentFertilityFactor": [0, 0],
                      "agentImmuneSystemLength": 0,
                      "agentInheritancePolicy": "none",
+                     "agentLeader": False,
                      "agentLendingFactor": [0, 0],
                      "agentLoanDuration": [0, 0],
                      "agentLookaheadFactor": [0, 0],
