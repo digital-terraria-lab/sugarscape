@@ -777,7 +777,11 @@ class Sugarscape:
             t += 1
             if self.gui != None and self.run == False:
                 self.pauseSimulation()
-        self.endSimulation()
+        if self.configuration["keepAliveAtEnd"] == True and self.gui != None:
+            self.run = False
+            self.pauseSimulation()
+        else:
+            self.endSimulation()
 
     def startLog(self):
         if self.log == None:
@@ -825,7 +829,7 @@ class Sugarscape:
         equalityLineArea = 0.5
         giniCoefficient = round((equalityLineArea - lorenzCurveArea) / equalityLineArea, 3)
         return giniCoefficient
-    
+
     def updateGraphStats(self):
         histogramBins = self.gui.xTicks
 
@@ -1369,9 +1373,9 @@ def verifyConfiguration(configuration):
     for peak in configuration["environmentSpicePeaks"]:
         if len(peak) < 3:
             peak.append(configuration["environmentMaxSpice"])
-        if peak[0] < 0:
+        if peak[0] < 0 or peak[0] > configuration["environmentWidth"]:
             peak[0] = random.randint(0, configuration["environmentWidth"] - 1)
-        if peak[1] < 0:
+        if peak[1] < 0 or peak[1] > configuration["environmentHeight"]:
             peak[1] = random.randint(0, configuration["environmentHeight"] - 1)
         if len(peak) < 3 or peak[2] < 0:
             peak[2] = random.randint(1, configuration["environmentMaxSpice"])
@@ -1380,9 +1384,9 @@ def verifyConfiguration(configuration):
     for peak in configuration["environmentSugarPeaks"]:
         if len(peak) < 3:
             peak.append(configuration["environmentMaxSugar"])
-        if peak[0] < 0:
+        if peak[0] < 0 or peak[0] > configuration["environmentWidth"]:
             peak[0] = random.randint(0, configuration["environmentWidth"] - 1)
-        if peak[1] < 0:
+        if peak[1] < 0 or peak[1] > configuration["environmentHeight"]:
             peak[1] = random.randint(0, configuration["environmentHeight"] - 1)
         if peak[2] < 0:
             peak[2] = random.randint(1, configuration["environmentMaxSugar"])
@@ -1452,7 +1456,7 @@ def verifyConfiguration(configuration):
         if "all" in configuration["debugMode"] or "environment" in configuration["debugMode"]:
             print(f"Cannot have a negative number of tribes. Setting number of tribes to 0.")
         configuration["environmentMaxTribes"] = 0
-    
+
     # Ensure at most number of tribes is equal to agent tag string length
     if configuration["agentTagStringLength"] > 0 and configuration["environmentMaxTribes"] > configuration["agentTagStringLength"]:
         if "all" in configuration["debugMode"] or "environment" in configuration["debugMode"] or "agent" in configuration["debugMode"]:
@@ -1619,6 +1623,7 @@ if __name__ == "__main__":
                      "interfaceHeight": 1000,
                      "interfaceWidth": 900,
                      "keepAlivePostExtinction": False,
+                     "keepAliveAtEnd": False,
                      "logfile": None,
                      "logfileFormat": "json",
                      "neighborhoodMode": "vonNeumann",
