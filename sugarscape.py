@@ -64,6 +64,7 @@ class Sugarscape:
         self.replacedAgents = []
 
         self.activeQuadrants = self.findActiveQuadrants()
+        self.agentRuntimeStats = []
         self.configureDepression()
         self.configureAgents(configuration["startingAgents"])
         self.configureDiseases(configuration["startingDiseases"], configuration["diseaseList"])
@@ -80,14 +81,18 @@ class Sugarscape:
                              "agentCombatDeaths": 0, "agentAgingDeaths": 0, "agentDeaths": 0, "largestTribe": 0, "largestTribeSize": 0,
                              "remainingTribes": self.configuration["environmentMaxTribes"], "sickAgents": 0, "carryingCapacity": 0, "meanDeathsPercentage": 0,
                              "sickAgentsPercentage": 0, "meanSelfishness": 0, "diseaseEffectiveReproductionRate": 0, "diseaseIncidence": 0, "diseasePrevalence": 0,
-                             "agentLastMoveOptimalityPercentage": 0
+                             "agentLastMoveOptimalityPercentage": 0, "meanNeighbors": 0, "meanMoveRank": 0, "meanMoveDifferenceFromOptimal": 0,
+                             "meanValidMoves": 0
                              }
         self.graphStats = {"ageBins": [], "sugarBins": [], "spiceBins": [], "lorenzCurvePoints": [], "meanTribeTags": [],
                            "maxSugar": 0, "maxSpice": 0, "maxWealth": 0}
         self.log = open(configuration["logfile"], 'a') if configuration["logfile"] != None else None
+        self.agentLog = open(configuration["agentLogfile"], 'a') if configuration["agentLogfile"] != None else None
         self.logFormat = configuration["logfileFormat"]
         self.experimentalGroup = configuration["experimentalGroup"]
         if self.experimentalGroup != None:
+            self.groupMovementStats = {"meanControlNeighbors": 0, "meanExperimentalNeighbors": 0}
+            self.runtimeStats.update(self.groupMovementStats)
             # Convert keys to Pythonic case scheme and initialize values
             groupRuntimeStats = {}
             for key in self.runtimeStats.keys():
@@ -190,6 +195,7 @@ class Sugarscape:
                 cornerCell = self.environment.grid[0][0]
                 a.gotoCell(cornerCell)
                 self.agentLeader = a
+
             # If using a different decision model, replace new agent with instance of child class
             if "altruist" in agentConfiguration["decisionModel"]:
                 a = ethics.Bentham(agentID, self.timestep, placementCell, agentConfiguration)
@@ -204,6 +210,8 @@ class Sugarscape:
             elif "negativeBentham" in agentConfiguration["decisionModel"]:
                 a = ethics.Bentham(agentID, self.timestep, placementCell, agentConfiguration)
                 a.selfishnessFactor = -1
+            elif "temperance" in agentConfiguration["decisionModel"]:
+                a = ethics.Temperance(agentID, self.timestep, placementCell, agentConfiguration)
 
             # If dynamic selfishness is desired but not defined, give a small degree of dynamic selfishness
             if "Dynamic" in agentConfiguration["decisionModel"] and self.configuration["agentDynamicSelfishnessFactor"] == [0.0, 0.0]:
@@ -212,6 +220,10 @@ class Sugarscape:
                 a.decisionModelLookaheadFactor = 0
             elif "HalfLookahead" in agentConfiguration["decisionModel"]:
                 a.decisionModelLookaheadFactor = 0.5
+
+            # If using a deontological decision model, replace new agent with instance of child class
+            if "asimov" in agentConfiguration["decisionModel"]:
+                a = ethics.Asimov(agentID, self.timestep, placementCell, agentConfiguration)
 
             if self.configuration["environmentTribePerQuadrant"] == True:
                 tribe = quadrantIndex
@@ -370,37 +382,62 @@ class Sugarscape:
                 self.gui.doTimestep()
             # If final timestep, do not write to log to cleanly close JSON array log structure
             if self.timestep != self.maxTimestep and len(self.agents) > 0:
-                self.writeToLog()
+                self.writeToLog(self.log)
+                # Start recording agent actions only after agents have started acting
+                if self.timestep == 1:
+                    self.startLog(self.agentLog)
+                self.writeToLog(self.agentLog)
+                self.agentRuntimeStats = []
 
-    def endLog(self):
-        if self.log == None:
+    def endLog(self, log):
+        if log == None:
             return
         # Update total wealth accumulation to include still living agents at simulation end
-        environmentWealthCreated = 0
-        environmentWealthTotal = 0
-        for i in range(self.environment.width):
-            for j in range(self.environment.height):
-                environmentWealthCreated += self.environment.grid[i][j].sugarLastProduced + self.environment.grid[i][j].spiceLastProduced
-                environmentWealthTotal += self.environment.grid[i][j].sugar + self.environment.grid[i][j].spice
-        self.runtimeStats["environmentWealthCreated"] = environmentWealthCreated
-        self.runtimeStats["environmentWealthTotal"] = environmentWealthTotal
-        logString = '\t' + json.dumps(self.runtimeStats) + "\n]"
+        stats = self.runtimeStats
+        logString = ""
+        if log == self.agentLog:
+            stats = self.agentRuntimeStats
+            for agentStats in stats:
+                if agentStats == stats[-1]:
+                    logString += f"\t{json.dumps(agentStats)}\n]"
+                else:
+                    logString += f"\t{json.dumps(agentStats)},\n"
+        else:
+            environmentWealthCreated = 0
+            environmentWealthTotal = 0
+            for i in range(self.environment.width):
+                for j in range(self.environment.height):
+                    environmentWealthCreated += self.environment.grid[i][j].sugarLastProduced + self.environment.grid[i][j].spiceLastProduced
+                    environmentWealthTotal += self.environment.grid[i][j].sugar + self.environment.grid[i][j].spice
+            self.runtimeStats["environmentWealthCreated"] = environmentWealthCreated
+            self.runtimeStats["environmentWealthTotal"] = environmentWealthTotal
+            logString = f"\t{json.dumps(stats)}\n]"
         if self.logFormat == "csv":
             logString = ""
             # Ensure consistent ordering for CSV format
-            for stat in sorted(self.runtimeStats):
-                if logString == "":
-                    logString += f"{self.runtimeStats[stat]}"
-                else:
-                    logString += f",{self.runtimeStats[stat]}"
-            logString += "\n"
-        self.log.write(logString)
-        self.log.flush()
-        self.log.close()
+            if log == self.agentLog:
+                for agentStats in stats:
+                    for stat in agentStats:
+                        if logString == "":
+                            logString += f"{agentStats[stat]}"
+                        else:
+                            logString += f",{agentStats[stat]}"
+                    logString += "\n"
+            else:
+                for stat in sorted(stats):
+                    if logString == "":
+                        logString += f"{stats[stat]}"
+                    else:
+                        logString += f",{stats[stat]}"
+                logString += "\n"
+        log.write(logString)
+        log.flush()
+        log.close()
 
     def endSimulation(self):
         self.removeDeadAgents()
-        self.endLog()
+        self.endLog(self.log)
+        self.endLog(self.agentLog)
         if "all" in self.debug or "sugarscape" in self.debug:
             print(str(self))
         exit(0)
@@ -491,6 +528,7 @@ class Sugarscape:
         decisionModelTribalFactor = configs["agentDecisionModelTribalFactor"]
         diseaseProtectionChance = configs["agentDiseaseProtectionChance"]
         dynamicSelfishnessFactor = configs["agentDynamicSelfishnessFactor"]
+        dynamicTemperanceFactor = configs["agentDynamicTemperanceFactor"]
         femaleFertilityAge = configs["agentFemaleFertilityAge"]
         femaleInfertilityAge = configs["agentFemaleInfertilityAge"]
         fertilityFactor = configs["agentFertilityFactor"]
@@ -515,8 +553,8 @@ class Sugarscape:
         sugarMetabolism = configs["agentSugarMetabolism"]
         tagPreferences = configs["agentTagPreferences"]
         tagging = configs["agentTagging"]
+        temperanceFactor = configs["agentTemperanceFactor"]
         tradeFactor = configs["agentTradeFactor"]
-        tagging = configs["agentTagging"]
         universalSpice = configs["agentUniversalSpice"]
         universalSugar = configs["agentUniversalSugar"]
         vision = configs["agentVision"]
@@ -533,6 +571,7 @@ class Sugarscape:
                           "decisionModelTribalFactor": {"endowments": [], "curr": decisionModelTribalFactor[0], "min": decisionModelTribalFactor[0], "max": decisionModelTribalFactor[1]},
                           "diseaseProtectionChance": {"endowments": [], "curr": diseaseProtectionChance[0], "min": diseaseProtectionChance[0], "max": diseaseProtectionChance[1]},
                           "dynamicSelfishnessFactor": {"endowments": [], "curr": dynamicSelfishnessFactor[0], "min": dynamicSelfishnessFactor[0], "max": dynamicSelfishnessFactor[1]},
+                          "dynamicTemperanceFactor": {"endowments": [], "curr": dynamicTemperanceFactor[0], "min": dynamicTemperanceFactor[0], "max": dynamicTemperanceFactor[1]},
                           "femaleFertilityAge": {"endowments": [], "curr": femaleFertilityAge[0], "min": femaleFertilityAge[0], "max": femaleFertilityAge[1]},
                           "femaleInfertilityAge": {"endowments": [], "curr": femaleInfertilityAge[0], "min": femaleInfertilityAge[0], "max": femaleInfertilityAge[1]},
                           "fertilityFactor": {"endowments": [], "curr": fertilityFactor[0], "min": fertilityFactor[0], "max": fertilityFactor[1]},
@@ -549,6 +588,7 @@ class Sugarscape:
                           "spiceMetabolism": {"endowments": [], "curr": spiceMetabolism[0], "min": spiceMetabolism[0], "max": spiceMetabolism[1]},
                           "sugar": {"endowments": [], "curr": startingSugar[0], "min": startingSugar[0], "max": startingSugar[1]},
                           "sugarMetabolism": {"endowments": [], "curr": sugarMetabolism[0], "min": sugarMetabolism[0], "max": sugarMetabolism[1]},
+                          "temperanceFactor": {"endowments": [], "curr": temperanceFactor[0], "min": temperanceFactor[0], "max": temperanceFactor[1]},
                           "tradeFactor": {"endowments": [], "curr": tradeFactor[0], "min": tradeFactor[0], "max": tradeFactor[1]},
                           "universalSpice": {"endowments": [], "curr": universalSpice[0], "min": universalSpice[0], "max": universalSugar[1]},
                           "universalSugar": {"endowments": [], "curr": universalSugar[0], "min": universalSugar[0], "max": universalSugar[1]},
@@ -757,9 +797,8 @@ class Sugarscape:
             self.configureAgents(numReplacements)
 
     def runSimulation(self, timesteps=5):
-        self.startLog()
-        if self.log == None:
-            self.updateRuntimeStats()
+        self.startLog(self.log)
+        self.updateRuntimeStats()
         if self.gui != None:
             # Simulation begins paused until start button in GUI pressed
             self.gui.updateLabels()
@@ -783,23 +822,25 @@ class Sugarscape:
         else:
             self.endSimulation()
 
-    def startLog(self):
-        if self.log == None:
+    def startLog(self, log):
+        if log == None:
             return
+        stats = sorted(self.runtimeStats)
+        if log == self.agentLog:
+            stats = self.agentRuntimeStats[0]
         if self.logFormat == "csv":
             header = ""
             # Ensure consistent ordering for CSV format
-            for stat in sorted(self.runtimeStats):
+            for stat in stats:
                 if header == "":
                     header += f"{stat}"
                 else:
                     header += f",{stat}"
             header += "\n"
-            self.log.write(header)
+            log.write(header)
         else:
-            self.log.write("[\n")
-        self.updateRuntimeStats()
-        self.writeToLog()
+            log.write("[\n")
+        self.writeToLog(log)
 
     def toggleEnd(self):
         self.end = True
@@ -896,7 +937,7 @@ class Sugarscape:
         # Log separate stats for experimental and control groups
         if self.experimentalGroup != None:
             self.updateRuntimeStatsPerGroup(self.experimentalGroup)
-            self.updateRuntimeStatsPerGroup(self.experimentalGroup, True)
+            self.updateRuntimeStatsPerGroup(self.experimentalGroup, notInGroup=True)
         self.updateRuntimeStatsPerGroup()
 
     def updateRuntimeStatsPerGroup(self, group=None, notInGroup=False):
@@ -984,6 +1025,13 @@ class Sugarscape:
         agentsReplaced = 0
         remainingTribes = 0
         tribes = {}
+        
+        meanNeighbors = 0
+        meanControlNeighbors = 0
+        meanExperimentalNeighbors = 0
+        meanValidMoves = 0
+        meanMoveRank = 0
+        meanMoveDifferenceFromOptimal = 0
 
         for agent in self.agents:
             if group != None and agent.isInGroup(group, notInGroup) == False:
@@ -1016,6 +1064,22 @@ class Sugarscape:
             if agent.lastMoveOptimal == True:
                 agentLastMoveOptimalityPercentage += 1
             agentMoves += 1
+
+            meanNeighbors += len(agent.movementNeighborhood)
+            if self.experimentalGroup != None:
+                for neighbor in agent.movementNeighborhood:
+                    if neighbor.isInGroup(self.experimentalGroup, notInGroup=True):
+                        meanControlNeighbors += 1
+                    else:
+                        meanExperimentalNeighbors += 1
+            meanValidMoves += len(agent.validMoves)
+            for i in range(len(agent.validMoves)):
+                cell = agent.validMoves[i]["cell"]
+                if cell == agent.cell:
+                    meanMoveDifferenceFromOptimal += agent.validMoves[0]["wealth"] - agent.validMoves[i]["wealth"]
+                    meanMoveRank += i
+                    break
+
             if agent.isSick():
                 sickAgents += 1
             if agentWealth < minWealth:
@@ -1038,7 +1102,7 @@ class Sugarscape:
                 tradeExperimentalToControl += agent.tradeWithControlGroup
                 tradeExperimentalToExperimental += agent.tradeWithExperimentalGroup
                 agent.resetTimestepMetrics()
-            elif group != None and agent.isInGroup(group, True):
+            elif group != None and agent.isInGroup(group, notInGroup=True):
                 combatControlToControl += agent.combatWithControlGroup
                 combatControlToExperimental += agent.combatWithExperimentalGroup
                 diseaseControlToControl += agent.diseaseWithControlGroup
@@ -1092,7 +1156,7 @@ class Sugarscape:
                 reproductionExperimentalToExperimental += agent.reproductionWithExperimentalGroup
                 tradeExperimentalToControl += agent.tradeWithControlGroup
                 tradeExperimentalToExperimental += agent.tradeWithExperimentalGroup
-            elif group != None and agent.isInGroup(group, True):
+            elif group != None and agent.isInGroup(group, notInGroup=True):
                 combatControlToControl += agent.combatWithControlGroup
                 combatControlToExperimental += agent.combatWithExperimentalGroup
                 diseaseControlToControl += agent.diseaseWithControlGroup
@@ -1124,6 +1188,9 @@ class Sugarscape:
                 continue
             # If in the control group for a specific disease, skip the experimental disease
             elif group != None and self.isDiseaseExperimentalGroup(disease.ID) == True and notInGroup == True:
+                continue
+            # Depression does not have an infection mechanism for transmission
+            if disease.ID == "depression":
                 continue
             diseasePrevalence += len(disease.infected)
 
@@ -1157,6 +1224,14 @@ class Sugarscape:
             sickAgentsPercentage = round((sickAgents / numAgents) * 100, 2)
             diseaseEffectiveReproductionRate = round(diseaseIncidence / len(infectors), 2) if len(infectors) > 0 else 0
             agentLastMoveOptimalityPercentage = round((agentLastMoveOptimalityPercentage / agentMoves) * 100, 2)
+            
+            meanNeighbors = round(meanNeighbors / numAgents, 2)
+            meanControlNeighbors = round(meanControlNeighbors / numAgents, 2)
+            meanExperimentalNeighbors = round(meanExperimentalNeighbors / numAgents, 2)
+            meanValidMoves = round(meanValidMoves / numAgents, 2)
+            meanMoveRank = round(meanMoveRank / numAgents, 2)
+            meanMoveDifferenceFromOptimal = round(meanMoveDifferenceFromOptimal / meanNeighbors, 2) if meanNeighbors > 0 else 0
+            
         else:
             agentMeanTimeToLive = 0
             agentWealthBurnRate = 0
@@ -1197,13 +1272,15 @@ class Sugarscape:
                         "carryingCapacity": carryingCapacity, "largestTribe": maxTribe, "largestTribeSize": maxTribeSize, "maxWealth": maxWealth,
                         "meanAge": meanAge, "meanAgeAtDeath": meanAgeAtDeath, "meanConflictHappiness": meanConflictHappiness,
                         "meanFamilyHappiness": meanFamilyHappiness, "meanHappiness": meanHappiness, "meanHealthHappiness": meanHealthHappiness,
-                        "meanMetabolism": meanMetabolism, "meanMovement": meanMovement, "meanSelfishness": meanSelfishness,
+                        "meanMetabolism": meanMetabolism, "meanMovement": meanMovement, "meanMoveDifferenceFromOptimal": meanMoveDifferenceFromOptimal,
+                        "meanMoveRank": meanMoveRank, "meanNeighbors": meanNeighbors, "meanSelfishness": meanSelfishness,
                         "meanSocialHappiness": meanSocialHappiness, "meanTradePrice": meanTradePrice, "meanWealth": meanWealth,
-                        "meanWealthHappiness": meanWealthHappiness, "meanVision": meanVision, "minWealth": minWealth, "population": numAgents,
-                        "sickAgents": sickAgents, "remainingTribes": remainingTribes, "tradeVolume": tradeVolume,
+                        "meanWealthHappiness": meanWealthHappiness, "meanValidMoves": meanValidMoves, "meanVision": meanVision, "minWealth": minWealth,
+                        "population": numAgents, "sickAgents": sickAgents, "remainingTribes": remainingTribes, "tradeVolume": tradeVolume,
                         "meanDeathsPercentage": meanDeathsPercentage, "sickAgentsPercentage": sickAgentsPercentage,
                         "diseaseEffectiveReproductionRate": diseaseEffectiveReproductionRate, "diseaseIncidence": diseaseIncidence,
-                        "diseasePrevalence": diseasePrevalence, "agentLastMoveOptimalityPercentage": agentLastMoveOptimalityPercentage}
+                        "diseasePrevalence": diseasePrevalence, "agentLastMoveOptimalityPercentage": agentLastMoveOptimalityPercentage
+                        }
 
         controlInteractionStats = {"combatControlGroupToControlGroup": combatControlToControl, "combatControlGroupToExperimentalGroup": combatControlToExperimental,
                                    "diseaseControlGroupToControlGroup": diseaseControlToControl, "diseaseControlGroupToExperimentalGroup": diseaseControlToExperimental,
@@ -1218,6 +1295,10 @@ class Sugarscape:
                                         "reproductionExperimentalGroupToControlGroup": reproductionExperimentalToControl, "reproductionExperimentalGroupToExperimentalGroup": reproductionExperimentalToExperimental,
                                         "tradeExperimentalGroupToControlGroup": tradeExperimentalToControl, "tradeExperimentalGroupToExperimentalGroup": tradeExperimentalToExperimental
                                         }
+
+        groupMovementStats = {"meanControlNeighbors": meanControlNeighbors, "meanExperimentalNeighbors": meanExperimentalNeighbors}
+        if self.experimentalGroup != None:
+            runtimeStats.update(groupMovementStats)
 
         if group == None:
             self.runtimeStats["environmentWealthCreated"] = environmentWealthCreated
@@ -1243,20 +1324,36 @@ class Sugarscape:
         for key in runtimeStats.keys():
             self.runtimeStats[key] = runtimeStats[key]
 
-    def writeToLog(self):
-        if self.log == None:
+    def writeToLog(self, log):
+        if log == None:
             return
-        logString = '\t' + json.dumps(self.runtimeStats) + ",\n"
+        stats = self.runtimeStats
+        if log == self.agentLog:
+            stats = self.agentRuntimeStats
+            logString = ""
+            for agentStats in stats:
+                logString += f"\t{json.dumps(agentStats)},\n"
+        else:
+            logString = f"\t{json.dumps(stats)},\n"
         if self.logFormat == "csv":
             logString = ""
             # Ensure consistent ordering for CSV format
-            for stat in sorted(self.runtimeStats):
-                if logString == "":
-                    logString += f"{self.runtimeStats[stat]}"
-                else:
-                    logString += f",{self.runtimeStats[stat]}"
-            logString += "\n"
-        self.log.write(logString)
+            if log == self.agentLog:
+                for agentStats in stats:
+                    for stat in agentStats:
+                        if logString == "":
+                            logString += f"{agentStats[stat]}"
+                        else:
+                            logString += f",{agentStats[stat]}"
+                    logString += "\n"
+            else:
+                for stat in sorted(stats):
+                    if logString == "":
+                        logString += f"{stats[stat]}"
+                    else:
+                        logString += f",{stats[stat]}"
+                logString += "\n"
+        log.write(logString)
 
     def __str__(self):
         string = f"{str(self.environment)}Seed: {self.seed}\nTimestep: {self.timestep}\nLiving Agents: {len(self.agents)}"
@@ -1333,7 +1430,8 @@ def sortConfigurationTimeframes(configuration, timeframe):
 
 def verifyConfiguration(configuration):
     negativesAllowed = ["agentDecisionModelTribalFactor", "agentMaxAge", "agentSelfishnessFactor"]
-    negativesAllowed += ["diseaseAggressionPenalty", "diseaseFertilityPenalty", "diseaseMovementPenalty", "diseaseSpiceMetabolismPenalty", "diseaseSugarMetabolismPenalty", "diseaseTimeframe", "diseaseVisionPenalty"]
+    negativesAllowed += ["diseaseAggressionPenalty", "diseaseFertilityPenalty", "diseaseFriendlinessPenalty", "diseaseHappinessPenalty", "diseaseMovementPenalty"]
+    negativesAllowed += ["diseaseSpiceMetabolismPenalty", "diseaseSugarMetabolismPenalty", "diseaseTimeframe", "diseaseVisionPenalty"]
     negativesAllowed += ["environmentEquator", "environmentPollutionDiffusionTimeframe", "environmentPollutionTimeframe", "environmentMaxSpice", "environmentMaxSugar"]
     negativesAllowed += ["interfaceHeight", "interfaceWidth", "seed", "timesteps"]
     timeframes = ["diseaseTimeframe", "environmentPollutionDiffusionTimeframe", "environmentPollutionTimeframe"]
@@ -1446,6 +1544,27 @@ def verifyConfiguration(configuration):
         if "all" in configuration["debugMode"] or "agent" in configuration["debugMode"]:
             print(f"Cannot have agent maximum selfishness factor of {configuration['agentSelfishnessFactor'][1]}. Setting agent maximum selfishness factor to 1.0.")
         configuration["agentSelfishnessFactor"][1] = 1
+    
+    # Ensure agent temperance is properly set
+    if configuration["agentTemperanceFactor"][0] < 0:
+        if configuration["agentTemperanceFactor"][1] != -1:
+            if "all" in configuration["debugMode"] or "agent" in configuration["debugMode"]:
+                print(f"Cannot have agent temperance factor range of  {configuration['agentTemperanceFactor']}. Disabling agent temperance.")
+        configuration["agentTemperanceFactor"] = [-1,-1]
+    elif configuration["agentTemperanceFactor"][1] > 1:
+        if "all" in configuration["debugMode"] or "agent" in configuration["debugMode"]:
+            print(f"Cannot have agent maximum temperance factor of {configuration['agentTemperanceFactor'][1]}. Setting agent maximum temperance factor to 1.0.")
+        configuration["agentTemperanceFactor"][1] = 1.0
+    
+    if configuration["agentDynamicTemperanceFactor"][0] < 0:
+        if configuration["agentTemperanceFactor"][1] != -1:
+            if "all" in configuration["debugMode"] or "agent" in configuration["debugMode"]:
+                print(f"Cannot have agent dynamic temperance factor of {configuration['agentDynamicTemperanceFactor']}. Disabling agent temperance.")
+        configuration["agentDynamicTemperanceFactor"] = [-1,-1]
+    elif configuration["agentDynamicTemperanceFactor"][1] > 1:
+        if "all" in configuration["debugMode"] or "agent" in configuration["debugMode"]:
+            print(f"Cannot have agent maximum dynamic temperance factor of {configuration['agentDynamicTemperanceFactor'][1]}. Setting agent maximum dynamic temperance change to 1.0.")
+        configuration["agentDynamicTemperanceFactor"][1] = 1.0
 
     if configuration["agentTagStringLength"] < 0:
         if "all" in configuration["debugMode"] or "agent" in configuration["debugMode"]:
@@ -1491,6 +1610,9 @@ def verifyConfiguration(configuration):
 
     if configuration["logfile"] == "":
         configuration["logfile"] = None
+
+    if configuration["agentLogfile"] == "":
+        configuration["agentLogfile"] = None
 
     if configuration["seed"] == -1:
         configuration["seed"] = random.randrange(sys.maxsize)
@@ -1547,6 +1669,7 @@ if __name__ == "__main__":
                      "agentDepressionPercentage": 0,
                      "agentDiseaseProtectionChance": [0.0, 0.0],
                      "agentDynamicSelfishnessFactor": [0.0, 0.0],
+                     "agentDynamicTemperanceFactor": [0,0],
                      "agentFemaleInfertilityAge": [0, 0],
                      "agentFemaleFertilityAge": [0, 0],
                      "agentFertilityFactor": [0, 0],
@@ -1555,6 +1678,7 @@ if __name__ == "__main__":
                      "agentLeader": False,
                      "agentLendingFactor": [0, 0],
                      "agentLoanDuration": [0, 0],
+                     "agentLogfile": None,
                      "agentLookaheadFactor": [0, 0],
                      "agentMaleInfertilityAge": [0, 0],
                      "agentMaleFertilityAge": [0, 0],
@@ -1572,6 +1696,7 @@ if __name__ == "__main__":
                      "agentTagging": False,
                      "agentTagPreferences": False,
                      "agentTagStringLength": 0,
+                     "agentTemperanceFactor": [0,0],
                      "agentTradeFactor": [0, 0],
                      "agentUniversalSpice": [0,0],
                      "agentUniversalSugar": [0,0],
