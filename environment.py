@@ -1,5 +1,4 @@
 import math
-import random
 
 class Environment:
     # Assumption: grid is always indexed by [width][height]
@@ -7,9 +6,13 @@ class Environment:
         self.width = width
         self.height = height
         self.sugarscape = sugarscape
+        self.dummyCell = None
         self.equator = configuration["equator"] if configuration["equator"] >= 0 else math.ceil(self.height / 2)
         self.globalMaxSpice = configuration["globalMaxSpice"]
         self.globalMaxSugar = configuration["globalMaxSugar"]
+        self.inGroupAgeAbsoluteRanges = configuration["ageistAbsoluteRanges"]
+        self.inGroupAgeRelativeRange = configuration["ageistRelativeRange"]
+        self.inGroupRaces = configuration["inGroupRaces"]
         self.maxCombatLoot = configuration["maxCombatLoot"]
         self.neighborhoodMode = configuration["neighborhoodMode"]
         self.pollutionDiffusionCountdown = configuration["pollutionDiffusionDelay"]
@@ -24,6 +27,7 @@ class Environment:
         self.seasonNorth = "wet" if configuration["seasonInterval"] > 0 else None
         self.seasonSouth = "dry" if configuration["seasonInterval"] > 0 else None
         self.seed = configuration["sugarscapeSeed"]
+        self.sexistGroups = configuration["sexistGroups"]
         self.spiceConsumptionPollutionFactor = configuration["spiceConsumptionPollutionFactor"]
         self.spiceProductionPollutionFactor = configuration["spiceProductionPollutionFactor"]
         self.spiceRegrowRate = configuration["spiceRegrowRate"]

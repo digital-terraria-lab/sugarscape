@@ -1,12 +1,13 @@
 import agent
 
+import copy
+import math
 import random
 import sys
 
 class Asimov(agent.Agent):
     def __init__(self, agentID, birthday, cell, configuration):
         super().__init__(agentID, birthday, cell, configuration)
-        self.lastTimeToLive = 0
 
     def findBestEthicalCell(self, cells, greedyBestCell=None):
         if len(cells) == 0:
@@ -19,7 +20,14 @@ class Asimov(agent.Agent):
             cell["wealth"] = self.findEthicalValueOfCell(cell["cell"])
         cells = self.sortCellsByWealth(cells)
         for cell in cells:
-            if cell["wealth"] > 0:
+            for neighbor in self.neighborhood:
+                if type(neighbor) != type(self) and neighbor.canReachCell(cell["cell"]) == True:
+                    lawTwoScore = self.scoreLawTwo(neighbor, cell["cell"])
+                    # Take the first positive recommendation from a neighbor as a command
+                    if lawTwoScore > 0:
+                        bestCell = cell["cell"]
+            # If no neighbors provide a recommendation, revert to self-preservation
+            if bestCell == None and cell["wealth"] > 0:
                 bestCell = cell["cell"]
                 break
 
@@ -43,8 +51,7 @@ class Asimov(agent.Agent):
             # If the first law would be broken, immediately stop consideration
             if lawOneScore < 0:
                 return lawOneScore
-            lawScores = lawOneScore + self.scoreLawTwo(neighbor)
-            scoreModifier += lawScores
+            scoreModifier += lawOneScore
         cellValue = scoreModifier * cellValue
         return cellValue
 
@@ -61,9 +68,20 @@ class Asimov(agent.Agent):
             return -1 * sys.maxsize
         return 0
 
-    def scoreLawTwo(self, neighbor):
+    def scoreLawTwo(self, neighbor, cell):
         # A robot must obey the orders given it by human beings except where such orders would conflict with the first law
-        # Robots are fully autonomous, thus implicitly always conform to the second law
+        # If a non-Asimov agent has a decision model, use their ethical evaluation else use the default valuation
+        if neighbor.decisionModelFactor > 0 and neighbor.decisionModel != self.decisionModel and neighbor.decisionModel != "none":
+            return neighbor.findEthicalValueOfCell(cell)
+        # Collect the relevant information for greedy agent evaluation
+        elif neighbor.decisionModel == "none":
+            robot = cell.agent
+            if robot != None and robot.decisionModel == self.decisionModel:
+                aggression = neighbor.findAggression()
+                combatMaxLoot = self.cell.environment.maxCombatLoot
+                robotSugar = aggression * min(combatMaxLoot, robot.sugar)
+                robotSpice = aggression * min(combatMaxLoot, robot.spice)
+                return neighbor.findValueOfCell(cell, robotSugar, robotSpice)
         return 0
 
     def scoreLawThree(self, cell):
@@ -137,6 +155,8 @@ class Bentham(agent.Agent):
         neighborhoodSize = len(self.neighborhood)
         futureNeighborhoodSize = len(self.findNeighborhood(cell)) if self.decisionModelLookaheadFactor != 0 else 1
         for neighbor in self.neighborhood:
+            if neighbor.isAlive() == False:
+                continue
             certainty = 1 if neighbor.canReachCell(cell) == True else 0
             # Skip if agent cannot reach cell
             if certainty == 0:
@@ -173,6 +193,35 @@ class Bentham(agent.Agent):
                 if cell == neighbor.cell and neighborCellValue > -1:
                     neighborCellValue = -1
 
+            if self.decisionModelAgeismFactor >= 0:
+                neighborAge = neighbor.age
+                inRelativeAgeWindow = abs(neighborAge - self.age) <= self.cell.environment.inGroupAgeRelativeRange
+                inAbsoluteAgeRange = False
+                for minAge, maxAge in self.cell.environment.inGroupAgeAbsoluteRanges:
+                    if neighborAge >= minAge and (neighborAge <= maxAge or maxAge == -1):
+                        inAbsoluteAgeRange = True
+                        break
+                # Neighbor is considered in-group for age if within relative or absolute age range
+                if inRelativeAgeWindow or inAbsoluteAgeRange:
+                    neighborCellValue *= self.decisionModelAgeismFactor
+                else:
+                    neighborCellValue *= 1 - self.decisionModelAgeismFactor
+            
+            if self.decisionModelRacismFactor >= 0:
+                neighborRace = neighbor.findRace()
+                if neighborRace == self.race or neighborRace in self.cell.environment.inGroupRaces:
+                    # If same race or in-group race, multiply by racism factor
+                    neighborCellValue *= self.decisionModelRacismFactor
+                else:
+                    # If different race and not in-group, multiply by inverse racism factor
+                    neighborCellValue *= 1 - self.decisionModelRacismFactor
+            if self.sex in self.cell.environment.sexistGroups and self.decisionModelSexismFactor >= 0:
+                if neighbor.sex == self.sex:
+                    # If same sex, multiply by sexism factor
+                    neighborCellValue *= self.decisionModelSexismFactor
+                else:
+                    # If different sex, multiply by inverse sexism factor
+                    neighborCellValue *= 1 - self.decisionModelSexismFactor
             if self.decisionModelTribalFactor >= 0:
                 if neighbor.findTribe() == self.findTribe():
                     neighborCellValue *= self.decisionModelTribalFactor
@@ -215,11 +264,11 @@ class Leader(agent.Agent):
         # Special leader agent should be configured to be immortal and omniscient
         self.fertilityFactor = 0.0
         self.follower = False
-        self.grid = [[[] for j in range(self.cell.environment.height)] for i in range(self.cell.environment.width)]
         self.agentPlacements = {}
         self.leader = True
         self.maxAge = -1
         self.movement = 0
+        self.recursionLimit = 100000
         self.spice = sys.maxsize
         self.spiceMetabolism = 0
         self.sugar = sys.maxsize
@@ -238,34 +287,73 @@ class Leader(agent.Agent):
         env = self.cell.environment
         agents = env.sugarscape.agents
 
-    def findBestCell(self):
+    def findBestCell(self, predeterminedBestCell=None):
         self.resetForTimestep()
-        agents = self.cell.environment.sugarscape.agents
-        agentsByNeed = []
+        defaultRecursionLimit = sys.getrecursionlimit()
+        sys.setrecursionlimit(self.recursionLimit)
+        agents = [agent for agent in copy.deepcopy(self.cell.environment.sugarscape.agents) if agent.isAlive() == True]
+
+        # Use a list of counters to iterate through the search space one possible placement at a time
+        cellRanges = []
+        counters = []
         for agent in agents:
-            if agent.isAlive() == False or agent == self:
-                continue
-            urgency = self.findUrgencyForAgent(agent)
-            viableCells = self.findViableCellsForAgent(agent)
-            for cell in viableCells:
-                self.grid[cell.x][cell.y].append({"agent": agent, "urgency": urgency})
+            cellsInRange = list(agent.cellsInRange.keys()) if len(agent.cellsInRange) > 0 else [agent.cell]
+            cellRanges.append(len(cellsInRange) - 1)
+            counters.append(0)
 
-        width = self.cell.environment.width
-        height = self.cell.environment.height
+        attempts = 0
+        maxAttempts = sys.maxsize
+        bestPlacement = {}
+        bestScore = (-1 * sys.maxsize) - 1
 
-        placedAgents = []
-        for i in range(width):
-            for j in range(height):
-                if len(self.grid[i][j]) == 0:
+        # Ensure each simulated timestep uses the same random numbers
+        randomNumberReset = random.getstate()
+        searchSpaceExhausted = False
+        while attempts < maxAttempts and searchSpaceExhausted == False:
+            possiblePlacement = {"placement": {}, "score": 0}
+            futurescape = copy.deepcopy(self.cell.environment.sugarscape)
+            random.setstate(randomNumberReset)
+
+            counterIndex = -1
+            for agent in agents:
+                # If agent is not in the copied environment, skip its consideration
+                agent = next(a for a in futurescape.agents if a.ID == agent.ID)
+                if agent == None:
                     continue
-                sorted(self.grid[i][j], key=lambda agentRecord: agentRecord["urgency"])
-                agent = self.grid[i][j].pop()["agent"]
-                cell = self.cell.environment.grid[i][j]
-                invalidCell = cell.isOccupied() and agent.isNeighborValidPrey(cell.agent) == False
-                while len(self.grid[i][j]) > 0 and (agent in placedAgents or agent.isAlive() == False or invalidCell == True) and len(self.grid[i][j]):
-                    agent = self.grid[i][j].pop()["agent"]
-                    invalidCell = cell.isOccupied() and agent.isNeighborValidPrey(cell.agent) == False
-                self.agentPlacements[agent.ID] = cell
+                counterIndex += 1
+                if agent.isAlive() == False:
+                    continue
+                agentPremoveIndex = counters[counterIndex]
+                cellsInRange = list(agent.cellsInRange.keys()) if len(agent.cellsInRange) > 0 else [agent.cell]
+                premove = cellsInRange[agentPremoveIndex]
+                agent.doTimestep(futurescape.timestep, premove)
+                currCell = agent.cell
+                if currCell == None:
+                    continue
+                possiblePlacement["placement"][agent.ID] = self.cell.environment.findCell(agent.cell.x, agent.cell.y)
+            futurescape.updateRuntimeStats()
+            possiblePlacement["score"] = futurescape.runtimeStats["meanHappiness"]
+            if possiblePlacement["score"] > bestScore:
+                bestScore = possiblePlacement["score"]
+                bestPlacement = possiblePlacement["placement"]
+
+            #Update counter indices
+            carry = 1
+            for i in range(-1, -1 * (len(counters) + 1), -1):
+                if carry > 0:
+                    counters[i] += carry
+                    carry = 0
+                if counters[i] > cellRanges[i]:
+                    counters[i] = 0
+                    carry = 1
+            # If there is a carry out on the last counter, all placements in the search space have been considered
+            if carry == 1 and counters[0] == 0:
+                searchSpaceExhausted = True
+            attempts += 1
+
+        self.agentPlacements = bestPlacement
+        random.setstate(randomNumberReset)
+        sys.setrecursionlimit(defaultRecursionLimit)
 
         # Leader agent should not move
         return self.cell
@@ -298,34 +386,165 @@ class Leader(agent.Agent):
         # Always ensure leader has maximum resources each timestep
         self.spice = sys.maxsize
         self.sugar = sys.maxsize
-        self.grid = [[[] for j in range(self.cell.environment.height) ] for i in range(self.cell.environment.width)]
-        #self.grid[self.cell.x][self.cell.y] = self
-        self.agentPlacements = {self.ID: self.cell}
+        self.agentPlacements = {}
 
     def spawnChild(self, childID, birthday, cell, configuration):
         return Leader(childID, birthday, cell, configuration)
 
 class Temperance(agent.Agent):
-    def __init__(self, agentID, birthday, cell, configuration):
+    def __init__(self, agentID, birthday, cell, configuration, pecs=False):
         super().__init__(agentID, birthday, cell, configuration)
+        self.totalMetabolism = self.findSugarMetabolism() + self.findSpiceMetabolism()
+        self.rules = {"agentConsumedAdequateResources": 0,
+                      "agentConsumedAmpleResources": 0,
+                      "communityDisapprovalOfAmpleResourceConsumption":  0,
+                      "agentOverconsumedResources": 0,
+                      "communityDisdainOfExtremeOverconsumption": 0
+                      }
+        self.timeSeenOverconsuming = 0
+        self.timesSeenIndulging = 0
+        self.timesOverharvested = 0
+        self.lastSelectedCellWealthToNeedRatio = 0
+        self.socialPressure = 0
+        self.lastDeltaTimeToLive = 0
+        self.pecs = pecs
 
-    def doTemperanceDecision(self):
-        randomValue = random.random()
-        if (randomValue >= self.temperanceFactor):
-            self.doIntemperanceAction()
+    def findBestEthicalCell(self, cells, greedyBestCell=None):
+        if len(cells) == 0:
+            return None
+        bestCell = None
+        if "all" in self.debug or "agent" in self.debug:
+            self.printCellScores(cells)
+
+        for cell in cells:
+            cell["wealth"] = self.findEthicalValueOfCell(cell["cell"])
+        cells = self.sortCellsByWealth(cells)
+        if self.pecs == True:
+            bestCell = cells[0]["cell"]
         else:
-            self.doTemperanceAction()
+            bestCell = self.findSimpleTemperanceBestEthicalCell(cells)
 
-    def doIntemperanceAction(self):
-        newTemperanceFactor = round(self.temperanceFactor - self.dynamicTemperanceFactor, 2)
-        self.temperanceFactor = newTemperanceFactor if newTemperanceFactor >= 0 else 0
+        if bestCell == None:
+            if greedyBestCell == None:
+                bestCell = cells[0]["cell"]
+            else:
+                bestCell = greedyBestCell
+            if "all" in self.debug or "agent" in self.debug:
+                print(f"Agent {self.ID} could not find an ethical cell")
+        return bestCell
 
-    def doTemperanceAction(self):
-        newTemperanceFactor = round(self.temperanceFactor + self.dynamicTemperanceFactor, 2)
-        self.temperanceFactor = newTemperanceFactor if newTemperanceFactor <= 1 else 1
+    def findCellCognitiveScore(self, cell):
+        deltaTimeToLive = self.findTimeToLive(potentialCell=cell) - self.timeToLive
+        score = 0
+        if deltaTimeToLive < 1:
+            return -1
+        elif deltaTimeToLive >= 1 and deltaTimeToLive < 2 and self.rules['agentConsumedAdequateResources']:
+            score += self.rules["agentConsumedAdequateResources"]
+        elif deltaTimeToLive >= 2 and deltaTimeToLive < 3 and self.rules["agentConsumedAmpleResources"]:
+            score += self.rules["agentConsumedAmpleResources"]
+            if self.rules["communityDisapprovalOfAmpleResourceConsumption"]:
+                score -= self.rules["communityDisapprovalOfAmpleResourceConsumption"]
+        elif deltaTimeToLive >= 3 and self.rules["agentOverconsumedResources"]:
+            score -= self.rules["agentOverconsumedResources"]
+            if self.rules["communityDisdainOfExtremeOverconsumption"]:
+                score -= self.rules["communityDisdainOfExtremeOverconsumption"]
+        return math.erf(score)
+
+    def findCellEmotionalScore(self, cell):
+        deltaTimeToLive = self.findTimeToLive(potentialCell=cell) - self.timeToLive
+        score = 0
+        if deltaTimeToLive > 1:
+            score = score - self.timesOverharvested
+            self.timesOverharvested += 1
+        return math.erf(score)
+
+    def findCellPhysicalScore(self):
+        return math.erf(1 / self.timeToLive) if self.timeToLive > 0 else 1
+
+    def findCellSimpleScore(self, cell):
+        return abs(self.findTimeToLive(potentialCell=cell) - self.timeToLive)
+
+    def findCellSocialScore(self, cell):
+        deltaTimeToLive = self.findTimeToLive(potentialCell=cell) - self.timeToLive
+        score = 0
+        if deltaTimeToLive <= 1:
+            score = 1
+        elif deltaTimeToLive > 1 and deltaTimeToLive <= 2:
+            score -= self.timeSeenOverconsuming
+        elif deltaTimeToLive > 2:
+            score -= self.timesSeenIndulging
+        score *= self.socialPressure
+        return math.erf(score)
+
+    def findEthicalValueOfCell(self, cell):
+        score = self.findCellSimpleScore(cell)
+        if self.pecs == True:
+            if self.totalMetabolism == 0:
+                return 0
+            physicalScore = self.findCellPhysicalScore()
+            emotionalScore = self.findCellEmotionalScore(cell)
+            cognitiveScore = self.findCellCognitiveScore(cell)
+            socialScore = self.findCellSocialScore(cell)
+            score = physicalScore + emotionalScore + cognitiveScore + socialScore
+            # TODO: Improve fidelity to temperance as it relates to agent lives
+            #print(f"Agent {self.ID} -> ({cell.x},{cell.y}): {score} = {physicalScore} + {emotionalScore} + {cognitiveScore} + {socialScore}")
+        return score
+
+    def findSimpleTemperanceBestEthicalCell(self, cells):
+        bestCell = None
+        numCells = len(cells)
+        midpoint = math.floor(numCells / 2)
+        virtueRoll = random.random()
+        if virtueRoll < self.decisionModelFactor:
+            bestCell = cells[0]["cell"]
+            newTemperanceFactor = round(self.decisionModelFactor + self.dynamicDecisionModelFactor, 2)
+            self.decisionModelFactor = newTemperanceFactor if newTemperanceFactor <= 1 else 1
+        else:
+            bestCell = cells[-1]["cell"]
+            newTemperanceFactor = round(self.decisionModelFactor - self.dynamicDecisionModelFactor, 2)
+            self.decisionModelFactor = newTemperanceFactor if newTemperanceFactor >= 0 else 0
+        return bestCell
+
+    def updateAgentSocialPressureAfterConsumption(self):
+        if self.cell is None:
+            return
+        neighbors = len(self.findNeighborhood(self.cell))
+        if neighbors == 0:
+            return 0
+        else:
+            self.socialPressure += self.dynamicSocialPressureFactor
+            return self.socialPressure
+
+    def updateAgentTemperanceRules(self):
+        neighbors = len(self.findNeighborhood(self.cell))
+        if self.lastDeltaTimeToLive <= 1:
+            # Consuming up to 1x metabolic need is good for the agent
+            self.rules["agentConsumedAdequateResources"] += 1
+        elif self.lastDeltaTimeToLive > 1 and self.lastDeltaTimeToLive <= 2:
+            # Consuming 1-2x metabolic is is great for the agent
+            self.rules["agentConsumedAmpleResources"] += 1
+            # Consuming 1-2x metabolic need is overconsumption and is bad for the community
+            if neighbors > 0:
+                self.timeSeenOverconsuming += 1
+                self.rules["communityDisapprovalOfAmpleResourceConsumption"] += 1
+        elif self.lastDeltaTimeToLive > 2:
+            # Consuming more than 2x metabolic need is bad for both the agent and the community
+            self.rules["agentOverconsumedResources"] += 1
+            if neighbors > 0:
+                self.timesSeenIndulging += 1 
+                self.rules["communityDisdainOfExtremeOverconsumption"] += 1
+
+    def collectResourcesAtCell(self):
+        self.lastDeltaTimeToLive = self.findTimeToLive(potentialCell=self.cell) - self.timeToLive
+        super().collectResourcesAtCell()
+
+    def doMetabolism(self):
+        self.updateAgentSocialPressureAfterConsumption()
+        super().doMetabolism()
 
     def updateValues(self):
-        self.doTemperanceDecision()
+        super().updateValues()
+        self.updateAgentTemperanceRules()
 
     def spawnChild(self, childID, birthday, cell, configuration):
         return Temperance(childID, birthday, cell, configuration)
